@@ -6,10 +6,13 @@
  * (`test/perf/ab.mjs`), which copies this file into a worktree of an older
  * commit and runs the same benchmarks there. That last consumer is why the
  * builders here stay structural — plain object literals satisfying the shapes
- * `AgentWidget`, `FleetList` and `ConversationViewer` accept — rather than
- * importing anything from `src/`. A fixture that reached into production types
- * would stop compiling the moment it travelled to a tree where those types
- * differ, which is exactly the tree the comparison exists to measure.
+ * `AgentWidget` and `FleetList` accept, rather than importing anything from
+ * `src/`. A fixture that reached into production types would stop compiling
+ * the moment it travelled to a tree where those types differ, which is
+ * exactly the tree the comparison exists to measure. The agent conversation
+ * view has no fixture here: it runs pi's own `InteractiveMode` rendering
+ * against a derived object (see `src/ui/agent-view.ts`), so its render cost
+ * is pi's to benchmark, not this extension's.
  *
  * DETERMINISM RULES, all of them learned from a measurement that lied:
  *
@@ -135,60 +138,6 @@ export function makeManager(records: unknown[]) {
   } as any;
 }
 
-// ---- Conversation fixtures ----
-
-/** Prose long enough to wrap several times at any realistic viewer width. */
-const PARAGRAPH =
-  "The subagent inspected the module and found that the render path rebuilds " +
-  "its content on every frame, which is fine for a short transcript and not " +
-  "fine for a long one. Here is what it looked like in practice, at width 120.";
-
-/** Assistant text carries markdown, because since #259 that is what gets parsed. */
-const ASSISTANT_MARKDOWN =
-  `## Findings\n\n${PARAGRAPH}\n\n- the first observation, which wraps\n` +
-  "- the second observation\n\n```ts\nconst x = compute(input);\n```\n";
-
-/** A tool result: arbitrary bytes, rendered raw, capped by the viewer at 16 KB. */
-const TOOL_RESULT = `${PARAGRAPH}\n${PARAGRAPH}\n`;
-
-/**
- * A synthetic transcript of `n` messages, cycling user → assistant → toolResult.
- *
- * Message objects are stable across renders on purpose: the viewer's Markdown
- * cache is a `WeakMap` keyed by the message, so reusing one session across
- * iterations measures the warm path a real viewer sees on its second frame
- * onward. Build a fresh session to measure the cold one.
- */
-export function makeSession(n: number) {
-  const messages: any[] = [];
-  for (let i = 0; i < n; i++) {
-    const slot = i % 3;
-    if (slot === 0) {
-      messages.push({ role: "user", content: `Message ${i}: ${PARAGRAPH}` });
-    } else if (slot === 1) {
-      messages.push({
-        role: "assistant",
-        content: [
-          { type: "text", text: `${ASSISTANT_MARKDOWN}\n(message ${i})` },
-          { type: "toolCall", name: "read" },
-        ],
-      });
-    } else {
-      messages.push({
-        role: "toolResult",
-        toolName: "read",
-        content: [{ type: "text", text: `${TOOL_RESULT}(result ${i})` }],
-      });
-    }
-  }
-  return {
-    messages,
-    subscribe: () => () => {},
-    dispose: () => {},
-    getSessionStats: () => ({ tokens: { input: 0, output: 0, cacheWrite: 0 } }),
-  } as any;
-}
-
 // ---- Render harnesses ----
 
 /**
@@ -239,7 +188,7 @@ export function mountFleet(FleetList: any, records: unknown[]) {
     onTerminalInput: () => () => {},
     getEditorText: () => "",
     notify: () => {},
-    custom: () => new Promise(() => {}),
+    getToolsExpanded: () => false,
   });
   fleet.update();
   const tui = perfTui();
@@ -252,25 +201,3 @@ export function mountFleet(FleetList: any, records: unknown[]) {
   };
 }
 
-/** Construct a `ConversationViewer` over a synthetic session. */
-export function mountViewer(
-  Viewer: any,
-  session: any,
-  record: unknown = makeRecord(0),
-  markdownMode?: () => string,
-) {
-  const viewer = new Viewer(
-    perfTui(120, 40),
-    session,
-    record,
-    undefined,
-    perfTheme,
-    () => {},
-    undefined,
-    undefined,
-    undefined,
-    false,
-    markdownMode,
-  );
-  return viewer;
-}

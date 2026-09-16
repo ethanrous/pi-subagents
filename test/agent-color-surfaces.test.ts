@@ -3,7 +3,6 @@ import { registerAgents } from "../src/agent-types.js";
 import subagentsExtension from "../src/index.js";
 import type { AgentConfig, AgentRecord } from "../src/types.js";
 import { type AgentActivity, AgentWidget } from "../src/ui/agent-widget.js";
-import { ConversationViewer } from "../src/ui/conversation-viewer.js";
 import { FleetList, type FleetUICtx } from "../src/ui/fleet-list.js";
 
 const TYPE = "colored-reviewer";
@@ -189,17 +188,18 @@ describe("custom agent color runtime surfaces", () => {
       abort: vi.fn(() => true),
       steer: vi.fn(() => true),
     } as unknown as ConstructorParameters<typeof FleetList>[0];
-    const fleet = new FleetList(manager, new Map());
+    const fleet = new FleetList(manager);
     let factory: WidgetFactory | undefined;
     fleet.setUICtx({
       setWidget: (_key, content) => {
         if (typeof content === "function") factory = content as WidgetFactory;
       },
       onTerminalInput: vi.fn(() => vi.fn()),
+      getToolsExpanded: vi.fn(() => false),
+      setToolsExpanded: vi.fn(),
       getEditorText: vi.fn(() => ""),
       notify: vi.fn(),
-      custom: (() => new Promise<undefined>(() => {})) as FleetUICtx["custom"],
-    });
+    } satisfies FleetUICtx);
 
     try {
       fleet.update();
@@ -220,26 +220,6 @@ describe("custom agent color runtime surfaces", () => {
       expect(fallback).not.toContain(PURPLE_BACKGROUND);
     } finally {
       fleet.dispose();
-    }
-  });
-
-  it("renders the conversation viewer header with the display name and color", () => {
-    const record = makeRecord();
-    const viewer = new ConversationViewer(
-      { terminal: { rows: 30, columns: 120 }, requestRender: vi.fn() } as unknown as ConstructorParameters<typeof ConversationViewer>[0],
-      record.session!,
-      record,
-      undefined,
-      theme,
-      vi.fn(),
-    );
-
-    try {
-      const output = viewer.render(120).join("\n");
-      expect(output).toContain(DISPLAY_NAME);
-      expect(output).toContain(PURPLE_BACKGROUND);
-    } finally {
-      viewer.dispose();
     }
   });
 });

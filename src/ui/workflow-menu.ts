@@ -29,7 +29,7 @@ export interface WorkflowMenuDeps {
   tasks: ReadonlyMap<string, WorkflowTask>;
   /** The record behind an agent id, or undefined once it has been swept. */
   getRecord(id: string): AgentRecord | undefined;
-  /** The conversation overlay `c` opens on an agent row. */
+  /** The conversation view `c` opens on an agent row, in pi's main chat area. */
   viewAgentConversation(ctx: ExtensionCommandContext, record: AgentRecord): Promise<void>;
   /**
    * The session context, for the fleet-list entry point — that one is a
@@ -54,20 +54,6 @@ export async function showWorkflowDialog(
   task: WorkflowTask,
   deps: WorkflowMenuDeps,
 ): Promise<void> {
-  // Overlaid on the same terms as the conversation viewer, because they are
-  // reached the same way: both are rows of the fleet list, and opening one
-  // must not behave unlike opening the other. Inline, the frame would render
-  // into the conversation and stay in the scrollback after it closed.
-  const { VIEWPORT_HEIGHT_PCT } = await import("./conversation-viewer.js");
-  /**
-   * This dialog's own overlay, so `c` can hide it while the conversation is
-   * up. Overlays stack, so the viewer would render *over* it either way —
-   * but the two frames size themselves to different content, and the taller
-   * one's edges show around the shorter. Hidden, there is nothing to peek
-   * out, and un-hiding puts the focus back on the dialog when the viewer
-   * closes.
-   */
-  let overlay: { setHidden(hidden: boolean): void } | undefined;
   await ctx.ui.custom<undefined>(
     (tui, theme, _keybindings, done) =>
       new WorkflowDialog(
@@ -126,23 +112,21 @@ export async function showWorkflowDialog(
               ctx.ui.notify("No conversation left — agent records are dropped ten minutes after they finish.", "info");
               return;
             }
-            overlay?.setHidden(true);
-            // Caught before the `finally`, so a viewer that fails to open
-            // still un-hides the dialog and cannot surface as an unhandled
-            // rejection out of a detached promise.
+            // The conversation view replaces pi's main chat area instead of
+            // stacking another overlay on top of this one, so the dialog
+            // closes first.
+            done(undefined);
             void deps.viewAgentConversation(ctx, record)
               .catch(err => ctx.ui.notify(
                 `Could not open the conversation: ${err instanceof Error ? err.message : String(err)}`,
                 "warning",
-              ))
-              .finally(() => overlay?.setHidden(false));
+              ));
           },
         },
       ),
     {
       overlay: true,
-      overlayOptions: { anchor: "center", width: "90%", maxHeight: `${VIEWPORT_HEIGHT_PCT}%` },
-      onHandle: handle => { overlay = handle; },
+      overlayOptions: { anchor: "center", width: "90%", maxHeight: "100%" },
     },
   );
 }

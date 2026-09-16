@@ -1,11 +1,15 @@
 /**
  * no-fs-on-render.perf.test.ts — a frame must not touch the disk.
  *
- * The widget and the conversation viewer redraw on every TUI frame, so a
- * synchronous read on either path blocks the event loop at up to 62 Hz. Nothing
- * on those paths reads today; this is the guard that keeps it that way, because
- * the mistake is easy to make and impossible to see in a functional test — the
- * output is identical either way, only the terminal stutters.
+ * The below-editor widget redraws on every TUI frame, so a synchronous read
+ * on its path blocks the event loop at up to 62 Hz. Nothing on that path
+ * reads today; this is the guard that keeps it that way, because the mistake
+ * is easy to make and impossible to see in a functional test: the output is
+ * identical either way, only the terminal stutters. The agent conversation
+ * view has no render path of its own to guard here: it runs pi's own
+ * `InteractiveMode` rendering against a derived object (see `agent-view.ts`),
+ * so a frame touching disk on that path would already be covered by pi's own
+ * equivalent guard, not this extension's.
  *
  * `node:fs` is mocked wholesale rather than spied on: `src/` imports its
  * functions by name (`import { readFileSync } from "node:fs"`), and a named ESM
@@ -34,8 +38,7 @@ vi.mock("node:fs", async (importOriginal) => {
 });
 
 const { AgentWidget } = await import("../../src/ui/agent-widget.js");
-const { ConversationViewer } = await import("../../src/ui/conversation-viewer.js");
-const { makeFleet, makeSession, mountViewer, mountWidget } = await import("../helpers/perf-fixtures.js");
+const { makeFleet, mountWidget } = await import("../helpers/perf-fixtures.js");
 
 describe("a rendered frame touches no filesystem", () => {
   it("AgentWidget.render", () => {
@@ -46,17 +49,6 @@ describe("a rendered frame touches no filesystem", () => {
     w.render();
     w.render();
     w.dispose();
-
-    expect(FS_CALLS).toEqual([]);
-  });
-
-  it("ConversationViewer.render", () => {
-    const viewer = mountViewer(ConversationViewer, makeSession(40));
-    viewer.render(120);
-    FS_CALLS.length = 0;
-
-    viewer.render(120);
-    viewer.render(120);
 
     expect(FS_CALLS).toEqual([]);
   });

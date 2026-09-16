@@ -40,3 +40,6 @@ test/perf/.results/
 # Pi internal files
 progress.md
 CLAUDE.md
+
+# Tracked in this fork: notes for agents working on the in-place conversation view.
+!CLAUDE.md

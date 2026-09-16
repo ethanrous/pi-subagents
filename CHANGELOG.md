@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **BREAKING: an agent's conversation opens in place of pi's main chat area instead of in an overlay.** The view runs pi's own `InteractiveMode` rendering (`handleEvent`, `rebuildChatFromMessages`, the thinking and tool-expand toggles) against the child session, and pi's footer shows the viewed session, so it matches the main chat exactly. While it is shown, prompt input steers or resumes that agent, Esc at an empty prompt or selecting `main` returns, `x x` in FleetView stops the selected agent, and FleetView rows are bright only when hovered or on screen. The `viewerMarkdown` setting and the viewer's own keys are removed. Relies on private pi internals; an incompatible pi version shows a notification instead of opening.
+
 ### Fixed
 - **The workflow stand-down now recognises a lowercase `workflow` tool** ([#283](https://github.com/tintinweb/pi-subagents/issues/283) — thanks [@zampierilucas](https://github.com/zampierilucas)). The match is exact on purpose, and the set held `Workflow` and `SubagentWorkflow` only, so `@quintinshaw/pi-dynamic-workflows` — which registers lowercase `workflow` — never tripped it: with `workflowsEnabled` unset, both orchestrators reached the model and nothing warned. Adding the third name is the whole fix; exactness is kept, so a `list_workflows` still cannot take the feature down.
 

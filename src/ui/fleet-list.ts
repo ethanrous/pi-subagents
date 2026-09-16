@@ -2,22 +2,28 @@
  * fleet-list.ts — Claude Code-style "FleetView" list rendered below the editor.
  *
  * Shows `main` + each running/queued subagent as a navigable list. Pressing ↓ (or
- * ←) at an empty prompt activates the list; ↑/↓ move the selection (filled ● marker),
- * Enter opens the selected agent's live conversation overlay, Esc returns to the prompt.
- * A viewer stays open when its agent finishes; finished agents linger briefly in the list.
+ * ←) at an empty prompt activates the list, marking the keyboard cursor with a
+ * filled `●`; ↑/↓ move it. Enter replaces pi's main chat area with the selected
+ * agent's live conversation (see `agent-view.ts`), Esc (or selecting `main`)
+ * restores the real chat. Whichever row is currently shown there - `main` by
+ * default - carries a hollow accent `◉` independent of where the cursor is, so
+ * leaving the list never leaves a stale cursor mark on screen. A view stays
+ * open when its agent finishes; finished agents linger briefly in the list.
  *
  * Mechanics (see plan): the list is a `belowEditor` widget (render-only), and ALL key
  * handling goes through `onTerminalInput` — which fires before the focused editor and
  * can `consume` keys — gated on `getEditorText() === ""` so normal typing is untouched.
+ * Unlike the agent conversation view, a workflow run's inspector is still a real
+ * modal overlay, so the list still defers to it while it is open.
  */
 
-import { Editor, isKeyRelease, Key, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { Editor, isKeyRelease, Key, matchesKey, type TUI, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { hasAgentBadge, renderAgentName } from "../agent-color.js";
 import { type AgentManager, isTopLevelAgent } from "../agent-manager.js";
-import type { AgentRecord, ViewerMarkdownMode } from "../types.js";
+import type { AgentRecord } from "../types.js";
 import { getLifetimeCost, getLifetimeTotal } from "../usage.js";
-import { type AgentActivity, formatCost, type Theme } from "./agent-widget.js";
-import { ConversationViewer, VIEWPORT_HEIGHT_PCT } from "./conversation-viewer.js";
+import { AgentView, resolveLiveInteractiveMode, type ToolsExpandedAccess } from "./agent-view.js";
+import { formatCost, type Theme } from "./agent-widget.js";
 
 /** Widget key for the below-editor fleet list. */
 const FLEET_KEY = "fleet";
@@ -29,19 +35,15 @@ const TICK_MS = 200;
 const FINISHED_LINGER_MS = 4000;
 
 /** Minimal UI surface the FleetView needs from `ctx.ui` (structural subset). */
-export type FleetUICtx = {
+export type FleetUICtx = ToolsExpandedAccess & {
   setWidget(
     key: string,
-    content: undefined | ((tui: any, theme: Theme) => { render(width: number): string[]; invalidate(): void; dispose?(): void }),
+    content: undefined | ((tui: TUI, theme: Theme) => { render(width: number): string[]; invalidate(): void }),
     options?: { placement?: "aboveEditor" | "belowEditor" },
   ): void;
   onTerminalInput(handler: (data: string) => { consume?: boolean; data?: string } | undefined): () => void;
   getEditorText(): string;
   notify(message: string, type?: "info" | "warning" | "error"): void;
-  custom<T>(
-    factory: (tui: any, theme: Theme, keybindings: any, done: (result: T) => void) => { render(width: number): string[]; invalidate(): void; dispose?(): void },
-    options?: { overlay?: boolean; overlayOptions?: unknown; onHandle?: (handle: unknown) => void },
-  ): Promise<T>;
 };
 
 /**
@@ -98,7 +100,8 @@ function rightAlign(left: string, right: string, width: number): string {
 
 export class FleetList {
   private ui: FleetUICtx | undefined;
-  private tui: any | undefined;
+  private tui: TUI | undefined;
+  private theme: Theme | undefined;
   private inputUnsub: (() => void) | undefined;
   private widgetRegistered = false;
   private timer: ReturnType<typeof setInterval> | undefined;
@@ -108,42 +111,33 @@ export class FleetList {
   private active = false;
   /** 0 = `main`, 1..N = subagents. */
   private selectedIndex = 0;
-  /** Set while a conversation overlay is open; calling it closes the overlay. */
-  private viewerClose: (() => void) | undefined;
-  private viewingAgentId: string | undefined;
+  /** Two-press confirm guard for the stop key, so a stray key can't kill the agent. */
+  private stopArmed = false;
+
+  /** The view currently occupying pi's chat slot, if any; see `agent-view.ts`. */
+  private currentView: AgentView | undefined;
+  /** The id of the agent whose conversation is currently shown in the main window. */
+  private viewedAgentId: string | undefined;
+
   /** Injected by the extension; absent until workflows are wired (or at all). */
   private workflowSource: (() => readonly FleetWorkflow[]) | undefined;
   private openWorkflow: ((id: string) => Promise<void> | void) | undefined;
   /**
-   * Set while the workflow inspector is up.
-   *
-   * It does the two jobs `viewerClose` does for an agent's overlay — keep the
-   * list out of the dialog's keys, and remember which row to come back to —
-   * minus the close handle, because that overlay belongs to the extension.
+   * Set while the workflow inspector is up. A workflow run is still a real
+   * modal overlay (`ctx.ui.custom`), so it keeps the list out of its keys and
+   * needs a way back to the right row when it closes, the way the agent view
+   * needed before it stopped being modal.
    */
   private viewingWorkflowId: string | undefined;
 
   constructor(
     private manager: AgentManager,
-    private agentActivity: Map<string, AgentActivity>,
     /**
      * Read live at render time. Whether each row shows an estimated cost after
      * its token count. Defaults to off — the extension supplies the user's
      * `showCost` setting.
      */
     private showCost: () => boolean = () => false,
-    /**
-     * The user's `viewerMarkdown` setting, for a conversation overlay opened
-     * from here. Read live rather than captured, because the viewer's `m` key
-     * changes it while the overlay is up. Omitted → the viewer's own default.
-     */
-    private viewerMarkdown?: () => ViewerMarkdownMode,
-    /**
-     * Persist a mode chosen with `m` in that overlay, so the key means the same
-     * thing here as it does from `/agents` — one setting, not one per entry
-     * point. Omitted → `m` still cycles, viewer-locally.
-     */
-    private onViewerMarkdown?: (mode: ViewerMarkdownMode) => void,
   ) {}
 
   // ---- Lifecycle ----
@@ -171,33 +165,63 @@ export class FleetList {
   }
 
   /**
-   * Called when an agent finishes. The viewer (if open on it) stays open so the
+   * Called when an agent finishes. The view (if open on it) stays open so the
    * final output remains readable, and the row lingers in the list — just refresh.
    */
   onAgentFinished(_id: string): void {
     this.update();
   }
 
+  /** Whether an agent's conversation currently occupies the main chat area. */
+  isViewingAgent(): boolean {
+    return this.viewedAgentId !== undefined;
+  }
+
+  /** The record currently shown in the main chat area, or undefined when it is main's own transcript. */
+  getViewedRecord(): AgentRecord | undefined {
+    return this.viewedAgentId ? this.manager.getRecord(this.viewedAgentId) : undefined;
+  }
+
+  /**
+   * Restore pi's own transcript to the main chat area. Safe to call whether or
+   * not a view is currently open. Used by FleetView's own Esc/`main` handling,
+   * and by the extension on session shutdown, session switch, and when the
+   * viewed agent's record is evicted.
+   */
+  closeView(): void {
+    if (this.viewedAgentId === undefined) return;
+    this.currentView?.close();
+    this.currentView = undefined;
+    this.viewedAgentId = undefined;
+  }
+
   dispose(): void {
     if (this.timer) { clearInterval(this.timer); this.timer = undefined; }
     this.inputUnsub?.();
     this.inputUnsub = undefined;
-    if (this.viewerClose) { this.viewerClose(); this.viewerClose = undefined; }
-    this.viewingAgentId = undefined;
+    this.closeView();
     // No handle to close the workflow inspector with, but the list is going
     // away — leaving the id set would keep it swallowing input forever.
     this.viewingWorkflowId = undefined;
     if (this.ui && this.widgetRegistered) this.ui.setWidget(FLEET_KEY, undefined);
     this.widgetRegistered = false;
     this.tui = undefined;
+    this.theme = undefined;
     this.active = false;
-    // Null last so a `viewerClose()` microtask above can't re-register the widget.
     this.ui = undefined;
   }
 
   /** Re-register/refresh the below-editor widget; clears it when nothing remains. */
   update(): void {
     if (!this.ui) return;
+
+    // The viewed agent's record can disappear from under the view: evicted by
+    // the manager's retention sweep, ten minutes after it finished. Nothing
+    // left to show; fall back to the real chat rather than a frozen transcript.
+    if (this.viewedAgentId !== undefined && this.manager.getRecord(this.viewedAgentId) === undefined) {
+      this.closeView();
+    }
+
     // A run with no agents of its own left in the list is still worth a row —
     // it is the thing the user opens to see what its children did. Read off the
     // roster for the same reason activation does: two counts of "is there
@@ -222,6 +246,7 @@ export class FleetList {
     if (!this.widgetRegistered) {
       this.ui.setWidget(FLEET_KEY, (tui, theme) => {
         this.tui = tui;
+        this.theme = theme;
         return {
           render: (w: number) => this.renderBar(w, theme),
           invalidate: () => { this.widgetRegistered = false; this.tui = undefined; },
@@ -248,7 +273,7 @@ export class FleetList {
     return this.manager.listAgents()
       .filter(a => isTopLevelAgent(a) && a.session && (
         a.status === "running" || a.status === "queued"
-        || a.id === this.viewingAgentId
+        || a.id === this.viewedAgentId
         || (a.completedAt != null && now - a.completedAt < FINISHED_LINGER_MS)
       ))
       .sort((a, b) => a.startedAt - b.startedAt);
@@ -311,10 +336,10 @@ export class FleetList {
     // emits both, and matchesKey matches either) — act on press only, or every
     // tap would move/fire twice. Repeats still pass through for held-key nav.
     if (isKeyRelease(data)) return undefined;
-    // While an overlay is open, let it own all input. Checked before the focus
-    // test below, which would otherwise read the dialog holding the keyboard as
-    // "the user left the list" and reset the selection out from under it.
-    if (this.viewerClose || this.viewingWorkflowId) return undefined;
+    // While the workflow inspector is open, let it own all input. A viewed
+    // agent's conversation is not modal - it lives in the main chat slot, and
+    // the editor keeps focus and the list keeps navigating right alongside it.
+    if (this.viewingWorkflowId) return undefined;
     // Input listeners fire BEFORE the focused component, and dialogs
     // (ctx.ui.select/confirm/input, pi's own menus) swap the prompt editor out
     // while getEditorText() still reads the detached — empty — editor. So when
@@ -322,6 +347,14 @@ export class FleetList {
     if (!this.editorHasFocus()) {
       if (this.active) this.deactivate();
       return undefined;
+    }
+
+    // Esc at an empty prompt always returns to the real chat, whether or not
+    // list navigation is currently engaged, mirroring FleetView's `main` row.
+    if (matchesKey(data, "escape") && this.viewedAgentId !== undefined && this.ui.getEditorText() === "") {
+      this.closeView();
+      this.deactivate();
+      return { consume: true };
     }
 
     if (!this.active) {
@@ -339,14 +372,16 @@ export class FleetList {
       return undefined;
     }
 
-    // Active — arrows navigate, Enter opens, Esc / Up-past-top exits.
+    // Active: arrows navigate, Enter opens, x stops, Esc / Up-past-top exits.
     if (matchesKey(data, "down")) {
       const max = this.roster().length - 1;
       this.selectedIndex = Math.min(max, this.selectedIndex + 1);
+      this.stopArmed = false;
       this.update();
       return { consume: true };
     }
     if (matchesKey(data, "up")) {
+      this.stopArmed = false;
       if (this.selectedIndex === 0) { this.deactivate(); return { consume: true }; }
       this.selectedIndex -= 1;
       this.update();
@@ -354,10 +389,25 @@ export class FleetList {
     }
     if (matchesKey(data, "escape")) { this.deactivate(); return { consume: true }; }
     if (matchesKey(data, Key.enter)) { this.openSelected(); return { consume: true }; }
+    if (matchesKey(data, "x")) { this.handleStopKey(); return { consume: true }; }
 
     // Any other key cancels navigation and flows to the editor.
     this.deactivate();
     return undefined;
+  }
+
+  /** Two-press stop: first `x` arms, second confirms; any other key disarms (handled in handleKey). */
+  private handleStopKey(): void {
+    const entry = this.roster()[this.selectedIndex];
+    const stoppable = entry?.kind === "agent" && (entry.record.status === "running" || entry.record.status === "queued");
+    if (!stoppable) { this.stopArmed = false; return; }
+    if (this.stopArmed) {
+      this.stopArmed = false;
+      if (this.manager.abort(entry.record.id)) this.ui?.notify(`Stopped "${entry.record.description}".`, "info");
+    } else {
+      this.stopArmed = true;
+    }
+    this.update();
   }
 
   /**
@@ -376,81 +426,76 @@ export class FleetList {
   private deactivate(): void {
     this.active = false;
     this.selectedIndex = 0;
+    this.stopArmed = false;
     this.update();
   }
 
   private openSelected(): void {
     const entry = this.roster()[this.selectedIndex];
     if (!entry || entry.kind === "main") {
-      // `main` = return to the prompt; the native transcript is already shown.
+      this.closeView();
       this.deactivate();
       return;
     }
     if (entry.kind === "workflow") {
-      // The extension owns this overlay and closes it, so there is no
-      // `viewerClose` to hold — but the list still has to know one is up, and
-      // still has to put the cursor back on the run when it comes down.
+      // The extension owns this overlay and closes it, so there is no local
+      // handle to hold, but the list still has to know one is up, and still
+      // has to put the cursor back on the run when it comes down.
       this.viewingWorkflowId = entry.workflow.id;
       void Promise.resolve(this.openWorkflow?.(entry.workflow.id)).then(
-        () => this.clearViewer(),
-        () => this.clearViewer(),
+        () => this.clearWorkflowViewer(),
+        () => this.clearWorkflowViewer(),
       );
       return;
     }
-    const record = entry.record;
+    void this.viewAgent(entry.record);
+  }
+
+  /**
+   * Show `record`'s live conversation in pi's main chat area (see
+   * `agent-view.ts`). The single entry point for opening an agent's
+   * conversation. FleetView's own Enter key, `/agents`, and the workflow
+   * dialog's `c` all call through here, so they cannot disagree on how a view
+   * opens or what it looks like.
+   */
+  async viewAgent(record: AgentRecord): Promise<void> {
     if (!this.ui) return;
+    if (!this.tui || !this.theme) {
+      this.ui.notify("Could not open the conversation: the main window is not ready yet.", "warning");
+      return;
+    }
     if (!record.session) {
       this.ui.notify(`Agent is ${record.status} — no session available.`, "info");
       return;
     }
-    const session = record.session;
-    const activity = this.agentActivity.get(record.id);
-    this.viewingAgentId = record.id;
-
-    void this.ui.custom<undefined>(
-      (tui, theme, keybindings, done) => {
-        this.viewerClose = () => done(undefined);
-        return new ConversationViewer(
-          tui,
-          session,
-          record,
-          activity,
-          theme,
-          done,
-          () => {
-            if (this.manager.abort(record.id)) this.ui?.notify(`Stopped "${record.description}".`, "info");
-          },
-          keybindings,
-          (message: string) => this.manager.steer(record.id, message),
-          this.showCost(),
-          this.viewerMarkdown,
-          this.onViewerMarkdown,
-        );
-      },
-      {
-        overlay: true,
-        overlayOptions: { anchor: "center", width: "90%", maxHeight: `${VIEWPORT_HEIGHT_PCT}%` },
-      },
-    ).then(() => this.clearViewer(), () => this.clearViewer());
+    const mode = resolveLiveInteractiveMode(this.ui);
+    if (!mode) {
+      this.ui.notify("Could not open the conversation: pi's interactive session was not found.", "error");
+      return;
+    }
+    // Release the slot before claiming it again: `AgentView.open()` locates
+    // pi's chat container by identity, so a straight switch from one agent's
+    // view to another's needs it back in place first, or it finds the
+    // previous view's container sitting there instead.
+    this.closeView();
+    const view = new AgentView(mode, record.session);
+    if (!(await view.open())) {
+      view.close();
+      this.ui.notify("Could not open the conversation: pi's chat layout was not found.", "error");
+      return;
+    }
+    this.currentView = view;
+    this.viewedAgentId = record.id;
+    this.update();
   }
 
-  /** Reset overlay state and return to the list (on close, auto-close, or error). */
-  private clearViewer(): void {
-    // Keep the cursor on the agent we were viewing — re-resolve by id so it
-    // still feels natural if the list reordered (an earlier agent finished)
-    // while the overlay was open. If that agent is gone, leave the index for
-    // update()'s clamp to settle.
-    const viewed = this.viewingAgentId ?? this.viewingWorkflowId;
+  /** Reset workflow-inspector state and put the cursor back on the run (on close, auto-close, or error). */
+  private clearWorkflowViewer(): void {
+    const viewed = this.viewingWorkflowId;
     if (viewed !== undefined) {
-      const idx = this.roster().findIndex(e =>
-        e.kind === "agent" ? e.record.id === viewed
-        : e.kind === "workflow" ? e.workflow.id === viewed
-        : false,
-      );
+      const idx = this.roster().findIndex(e => e.kind === "workflow" && e.workflow.id === viewed);
       if (idx >= 0) this.selectedIndex = idx;
     }
-    this.viewerClose = undefined;
-    this.viewingAgentId = undefined;
     this.viewingWorkflowId = undefined;
     this.update();
   }
@@ -465,12 +510,14 @@ export class FleetList {
     const sel = Math.min(this.selectedIndex, rows.length);
 
     const hint = this.active
-      ? "↑↓ select · enter view · esc back"
+      ? this.activeHint(rows, sel, theme)
       : "esc to interrupt · ← for agents · ↓ to manage";
     const lines: string[] = [];
     lines.push(truncateToWidth("  " + theme.fg("dim", hint), width));
     lines.push("");
-    lines.push(truncateToWidth(`  ${this.bullet(0, sel, theme)} main`, width));
+    const mainViewed = this.viewedAgentId === undefined;
+    const mainName = theme.fg(this.isHighlighted(0, sel, mainViewed) ? "text" : "muted", "main");
+    lines.push(truncateToWidth(`  ${this.bullet(0, sel, mainViewed, theme)} ${mainName}`, width));
 
     // Window the rows so the selected one stays visible.
     const visible = Math.min(MAX_AGENT_ROWS, rows.length);
@@ -492,8 +539,33 @@ export class FleetList {
     return lines;
   }
 
-  private bullet(rosterIndex: number, sel: number, theme: Theme): string {
-    return rosterIndex === sel ? theme.fg("accent", "●") : theme.fg("dim", "○");
+  /** The active-mode hint, with `x stop`/`x again to STOP` appended when the selected row is a stoppable agent. */
+  private activeHint(rows: (WorkflowEntry | AgentEntry)[], sel: number, theme: Theme): string {
+    const base = "↑↓ select · enter view · esc back";
+    const entry = rows[sel - 1];
+    const stoppable = entry?.kind === "agent" && (entry.record.status === "running" || entry.record.status === "queued");
+    if (!stoppable) return base;
+    return `${base} · ${this.stopArmed ? theme.fg("error", "x again to STOP") : "x stop"}`;
+  }
+
+  /**
+   * `●` marks the keyboard cursor, but only while actually navigating the
+   * list (`this.active`); otherwise `sel` is a stale index left over from
+   * the last time the list was active, and treating it as "selected" would
+   * mark whatever row happens to sit there (usually `main`, since `deactivate`
+   * resets `selectedIndex` to 0) rather than the agent actually on screen.
+   * `◉` marks the row currently shown in the main chat area, independent of
+   * where the cursor is.
+   */
+  /** A row reads as highlighted while the cursor is on it or its conversation is on screen. */
+  private isHighlighted(rosterIndex: number, sel: number, viewed: boolean): boolean {
+    return (this.active && rosterIndex === sel) || viewed;
+  }
+
+  private bullet(rosterIndex: number, sel: number, viewed: boolean, theme: Theme): string {
+    if (this.active && rosterIndex === sel) return theme.fg("accent", "●");
+    if (viewed) return theme.fg("accent", "◉");
+    return theme.fg("dim", "○");
   }
 
   /**
@@ -508,10 +580,10 @@ export class FleetList {
     width: number,
     theme: Theme,
   ): string {
-    const selected = rosterIndex === sel;
+    const selected = this.isHighlighted(rosterIndex, sel, false);
     const kind = theme.fg(selected ? "text" : "muted", "workflow");
     const name = selected ? theme.fg("text", workflow.name) : workflow.name;
-    const left = `  ${this.bullet(rosterIndex, sel, theme)} ${kind}  ${name}`;
+    const left = `  ${this.bullet(rosterIndex, sel, false, theme)} ${kind}  ${name}`;
     // Frozen once the run settles, exactly as an agent's clock is.
     const elapsed = (workflow.completedAt ?? Date.now()) - workflow.startedAt;
     const agents = `${workflow.doneCount}/${workflow.totalCount} agent${workflow.totalCount === 1 ? "" : "s"}`;
@@ -524,12 +596,13 @@ export class FleetList {
     // one selection (#230). A configured badge survives — Claude Code's FleetView
     // keeps the agent color on the selected row too and only bolds it — which also
     // keeps the row's width fixed as the selection moves.
-    const selected = rosterIndex === sel;
+    const viewed = record.id === this.viewedAgentId;
+    const selected = this.isHighlighted(rosterIndex, sel, viewed);
     const name = renderAgentName(record.type, theme, selected
       ? { fallbackColor: "text", bold: hasAgentBadge(record.type) }
       : { fallbackColor: "muted" });
     const description = selected ? theme.fg("text", record.description) : record.description;
-    const left = `  ${this.bullet(rosterIndex, sel, theme)} ${name}  ${description}`;
+    const left = `  ${this.bullet(rosterIndex, sel, viewed, theme)} ${name}  ${description}`;
     // The record, not the activity tracker — see the note in AgentWidget's
     // running line: only the record carries a nested child's spend, and only it
     // outlives the agent.
