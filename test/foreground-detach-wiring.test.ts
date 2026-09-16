@@ -1,6 +1,6 @@
 /**
- * foreground-detach-wiring.test.ts — ctrl+b and the viewer's `b` (send a live
- * foreground run to the background) through the REAL extension.
+ * foreground-detach-wiring.test.ts — ctrl+b (send a live foreground run to
+ * the background) through the REAL extension.
  *
  * The manager-level contract is covered in `foreground-detach.test.ts`. What is
  * only reachable here is the half the extension owns: what the blocked `Agent`
@@ -10,10 +10,7 @@
  * freezes the widget row and drops the completion notification.
  *
  * ctrl+b is driven through the terminal-input listener the extension installs
- * on the session UI. The viewer's `b` is driven through the action the
- * extension hands FleetView — the same factory `/agents` uses — rather than
- * through overlay keystrokes; the key-to-action path is pinned in
- * `conversation-viewer.test.ts`.
+ * on the session UI.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -23,17 +20,13 @@ vi.mock("../src/agent-runner.js", async () => {
 });
 
 /**
- * Stubbed for two reasons: the background action the extension supplies is
- * otherwise unreachable, and `onAgentFinished` is the observable proof that
- * the `Agent` tool's `finally` did not tear down a run that is still going.
+ * Stubbed so `onAgentFinished` is the observable proof that the `Agent` tool's
+ * `finally` did not tear down a run that is still going.
  */
-type BackgroundActionFor = (record: any, notify: (message: string) => void) => ViewerBackgroundAction;
-let backgroundActionFor: BackgroundActionFor | undefined;
 let fleet: { onAgentFinished: ReturnType<typeof vi.fn>; editorHasFocus: ReturnType<typeof vi.fn> } | undefined;
 vi.mock("../src/ui/fleet-list.js", () => ({
   FleetList: class {
-    constructor(...args: unknown[]) {
-      backgroundActionFor = args[6] as BackgroundActionFor;
+    constructor() {
       fleet = this as any;
     }
     setUICtx = vi.fn();
@@ -51,7 +44,6 @@ vi.mock("../src/ui/fleet-list.js", () => ({
 import { runAgent } from "../src/agent-runner.js";
 import subagentsExtension from "../src/index.js";
 import type { AgentRecord } from "../src/types.js";
-import type { ViewerBackgroundAction } from "../src/ui/conversation-viewer.js";
 import { ctx, flush, type Hermetic, hermeticDir, makePi, textOf } from "./helpers/boot-extension.js";
 
 let hermetic: Hermetic | undefined;
@@ -64,7 +56,6 @@ const registry = (): { getRecord(id: string): AgentRecord | undefined } =>
 
 beforeEach(() => {
   vi.mocked(runAgent).mockReset();
-  backgroundActionFor = undefined;
   fleet = undefined;
 });
 
@@ -129,9 +120,6 @@ const runAgentTool = (tools: Map<string, any>, prompt: string, opts: { signal?: 
     opts.onUpdate,
     ctx(),
   );
-
-/** Enough of pi's Theme for a real ConversationViewer. */
-const theme = { fg: (_color: string, text: string) => text, bold: (text: string) => text };
 
 const CTRL_B = "\x02";
 /** ctrl+b RELEASE under the Kitty keyboard protocol (codepoint 98, ctrl, event 3). */
@@ -223,33 +211,6 @@ describe("Agent tool — foreground run sent to the background", () => {
     runs.finish("bg job", "BG");
   });
 
-  it("the viewer's `b` hands off just that run", async () => {
-    const runs = controllableRuns();
-    const { tools } = boot();
-
-    const kept = runAgentTool(tools, "kept job");
-    const handed = runAgentTool(tools, "handed job");
-    await flush();
-
-    const notify = vi.fn();
-    const keptAction = backgroundActionFor!(registry().getRecord(runs.agentId("kept job")), notify);
-    const handedAction = backgroundActionFor!(registry().getRecord(runs.agentId("handed job")), notify);
-    expect(keptAction.available()).toBe(true);
-    expect(handedAction.available()).toBe(true);
-
-    handedAction.send();
-    expect(notify).toHaveBeenCalledWith('Sent "handed job" to the background.');
-    expect(textOf(await handed)).toContain("Agent started in background.");
-    // Gone the instant the handoff lands; the other run is still offered.
-    expect(handedAction.available()).toBe(false);
-    expect(keptAction.available()).toBe(true);
-
-    runs.finish("kept job", "KEPT-INLINE");
-    expect(textOf(await kept)).toContain("KEPT-INLINE");
-    expect(keptAction.available()).toBe(false);
-    runs.finish("handed job", "HANDED");
-  });
-
   it("shows the ctrl+b hint on a running row only once it can be handed off", async () => {
     const runs = controllableRuns();
     const { tools } = boot();
@@ -268,24 +229,27 @@ describe("Agent tool — foreground run sent to the background", () => {
 
   it("offers no handoff for a background spawn", async () => {
     const runs = controllableRuns();
-    const { tools } = boot();
+    const { tools, lifecycle } = boot();
+    const { ui, press } = terminalUi();
+    await lifecycle.get("session_start")({}, ctx({ hasUI: true, ui }));
     await runAgentTool(tools, "bg job", { background: true });
     await flush();
 
-    const action = backgroundActionFor!(registry().getRecord(runs.agentId("bg job")), vi.fn());
-    expect(action.available()).toBe(false);
+    expect(press(CTRL_B)).toBe(false);
     runs.finish("bg job", "BG");
   });
 
   it("keeps the tool call's Esc from reaching the agent afterwards", async () => {
     const runs = controllableRuns();
-    const { tools } = boot();
+    const { tools, lifecycle } = boot();
+    const { ui, press } = terminalUi();
+    await lifecycle.get("session_start")({}, ctx({ hasUI: true, ui }));
     const parent = new AbortController();
 
     const execution = runAgentTool(tools, "long job", { signal: parent.signal });
     await flush();
     const record = registry().getRecord(runs.agentId("long job"))!;
-    backgroundActionFor!(record, vi.fn()).send();
+    press(CTRL_B);
     await execution;
 
     parent.abort();
@@ -316,9 +280,11 @@ describe("Agent tool — foreground run sent to the background", () => {
     await flush();
     expect(pi.sendMessage).not.toHaveBeenCalled();
   });
-  it("shows one hint per batch, moving it on when that call is handed off", async () => {
+  it("shows one hint per batch, on the earliest call still running", async () => {
     const runs = controllableRuns();
-    const { tools } = boot();
+    const { tools, lifecycle } = boot();
+    const { ui, press } = terminalUi();
+    await lifecycle.get("session_start")({}, ctx({ hasUI: true, ui }));
     const firstUpdates = vi.fn();
     const secondUpdates = vi.fn();
 
@@ -329,23 +295,22 @@ describe("Agent tool — foreground run sent to the background", () => {
     await vi.waitFor(() => expect(secondUpdates.mock.lastCall?.[0].details).toBeDefined());
     expect(secondUpdates.mock.lastCall?.[0].details.backgroundHint).toBe(false);
 
-    backgroundActionFor!(registry().getRecord(runs.agentId("first job")), vi.fn()).send();
-    await first;
-    await vi.waitFor(() => expect(secondUpdates.mock.lastCall?.[0].details.backgroundHint).toBe(true));
-
+    press(CTRL_B);
+    await Promise.all([first, second]);
     runs.finish("second job", "DONE");
-    await second;
     runs.finish("first job", "DONE");
   });
 
   it("stops building tool updates once the call has returned", async () => {
     const runs = controllableRuns();
-    const { tools } = boot();
+    const { tools, lifecycle } = boot();
+    const { ui, press } = terminalUi();
+    await lifecycle.get("session_start")({}, ctx({ hasUI: true, ui }));
     const onUpdate = vi.fn();
 
     const execution = runAgentTool(tools, "long job", { onUpdate });
     await flush();
-    backgroundActionFor!(registry().getRecord(runs.agentId("long job")), vi.fn()).send();
+    press(CTRL_B);
     await execution;
     onUpdate.mockClear();
 
@@ -384,7 +349,7 @@ describe("Agent tool — foreground run sent to the background", () => {
 
     const execution = runAgentTool(tools, "long job");
     await flush();
-    // A dialog or the viewer's composer: there ctrl+b is cursor-left.
+    // A dialog: there ctrl+b is cursor-left.
     fleet!.editorHasFocus.mockReturnValue(false);
     expect(press(CTRL_B)).toBe(false);
     expect(registry().getRecord(runs.agentId("long job"))?.isBackground).toBe(false);
@@ -420,37 +385,6 @@ describe("Agent tool — foreground run sent to the background", () => {
     await flush();
     expect(press(CTRL_B)).toBe(true);
     expect(textOf(await execution)).toContain("Agent started in background.");
-    runs.finish("long job", "DONE");
-  });
-
-  it("wires `b` in the /agents viewer to the same handoff", async () => {
-    const runs = controllableRuns();
-    const { tools, commands } = boot();
-
-    const execution = runAgentTool(tools, "long job");
-    await flush();
-
-    let viewer: { handleInput(data: string): void } | undefined;
-    let closeViewer: (() => void) | undefined;
-    const picks = [(o: string[]) => o.find(x => x.startsWith("Running agents (")), (o: string[]) => o[0]];
-    const ui = {
-      setStatus: vi.fn(), setWidget: vi.fn(), notify: vi.fn(), addAutocompleteProvider: vi.fn(),
-      select: vi.fn(async (_title: string, options: string[]) => picks.shift()?.(options)),
-      custom: vi.fn((factory: any) => new Promise<undefined>(resolve => {
-        const done = () => resolve(undefined);
-        closeViewer = done;
-        viewer = factory({ mode: "regular", requestRender() {}, terminal: { columns: 120, rows: 40 } }, theme, undefined, done);
-      })),
-    };
-    const menu = commands.get("agents").handler("", ctx({ hasUI: true, ui }));
-    await vi.waitFor(() => expect(viewer).toBeDefined());
-
-    viewer!.handleInput("b");
-    expect(ui.notify).toHaveBeenCalledWith('Sent "long job" to the background.', "info");
-    expect(textOf(await execution)).toContain("Agent started in background.");
-
-    closeViewer!();
-    await menu;
     runs.finish("long job", "DONE");
   });
 });

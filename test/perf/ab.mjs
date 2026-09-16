@@ -3,7 +3,7 @@
  * ref, then print the difference.
  *
  *   npm run bench:ab -- master
- *   npm run bench:ab -- HEAD~1 --rounds 5 --filter viewer
+ *   npm run bench:ab -- HEAD~1 --rounds 5 --filter widget
  *
  * This is the question `vitest bench --compare` cannot answer. `--compare` only
  * annotates a run with a stored baseline and never fails; more importantly the

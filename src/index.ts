@@ -13,7 +13,7 @@
 import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import { type AgentSession, defineTool, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext, getAgentDir, getSettingsListTheme } from "@earendil-works/pi-coding-agent";
-import { Container, isKeyRelease, Key, matchesKey, type ScrollViewScrollbar, type SettingItem, SettingsList, Spacer, Text } from "@earendil-works/pi-tui";
+import { Container, isKeyRelease, Key, matchesKey, type SettingItem, SettingsList, Spacer, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { abortable } from "./abortable.js";
 import { hasAgentBadge, renderAgentName } from "./agent-color.js";
@@ -40,8 +40,9 @@ import { SubagentScheduler } from "./schedule.js";
 import { resolveStorePath, ScheduleStore } from "./schedule-store.js";
 import { applyAndEmitLoaded, loadSettings, type SubagentsSettings, saveAndEmitChanged, type ToolDescriptionMode } from "./settings.js";
 import { getForegroundOutcomeNote, getStatusNote, partialOutputSuffix } from "./status-note.js";
-import { type AgentConfig, type AgentInvocation, type AgentMentionMode, type AgentRecord, type JoinMode, type NotificationDetails, type SubagentType, type ViewerMarkdownMode, type WidgetMode } from "./types.js";
+import { type AgentConfig, type AgentInvocation, type AgentMentionMode, type AgentRecord, type JoinMode, type NotificationDetails, type SubagentType, type WidgetMode } from "./types.js";
 import { createMentionProvider, mentionRoster, type TypeInfo } from "./ui/agent-mention.js";
+import { ensureInteractiveModeBridge } from "./ui/agent-view.js";
 import {
   type AgentActivity,
   type AgentDetails,
@@ -60,7 +61,6 @@ import {
   type Theme,
   type UICtx,
 } from "./ui/agent-widget.js";
-import { ConversationViewer, getConversationOverlayOptions, type ViewerBackgroundAction } from "./ui/conversation-viewer.js";
 import { FleetList, type FleetUICtx, type FleetWorkflow } from "./ui/fleet-list.js";
 import { showSchedulesMenu } from "./ui/schedule-menu.js";
 import { selectItem } from "./ui/select-item.js";
@@ -312,6 +312,12 @@ export default function (pi: ExtensionAPI) {
   // injected as scoped custom tools by the existing manager instead.
   if (inChildSessionContext()) return;
 
+  // Captures the live `InteractiveMode` instance the first time pi calls one
+  // of a few reliably-early methods, so a subagent's conversation can run
+  // pi's own rendering later; see `ui/agent-view.ts`. Idempotent, so a reload
+  // of this extension does not wrap the same methods twice.
+  ensureInteractiveModeBridge();
+
   // ---- Register custom notification renderer ----
   pi.registerMessageRenderer<NotificationDetails>(
     "subagent-notification",
@@ -442,24 +448,6 @@ export default function (pi: ExtensionAPI) {
   let showModel = false;
   function isShowModelEnabled(): boolean { return showModel; }
   function setShowModel(b: boolean): void { showModel = b; widget.update(); }
-  /**
-   * How much of the conversation viewer renders as Markdown. Read through a
-   * getter by the viewer rather than captured like `showCost`, because the
-   * viewer's `m` key writes back here while the overlay is on screen.
-   */
-  let viewerMarkdown: ViewerMarkdownMode = "assistant";
-  function getViewerMarkdown(): ViewerMarkdownMode { return viewerMarkdown; }
-  function setViewerMarkdown(mode: ViewerMarkdownMode): void { viewerMarkdown = mode; }
-  /**
-   * The viewer's `m` key, from either entry point: set the mode and persist it,
-   * so the key and `/agents → Settings` stay one setting rather than one per
-   * entry point. `ctx` carries only the warning a failed write notifies with,
-   * and the fleet list may be acting without one.
-   */
-  function chooseViewerMarkdown(mode: ViewerMarkdownMode, ctx?: ExtensionCommandContext): void {
-    setViewerMarkdown(mode);
-    persistSettings(ctx, `Viewer markdown set to ${mode}`);
-  }
   const pendingUsage = new PendingUsagePool();
 
   // ---- Completion delivery ----
@@ -927,6 +915,34 @@ export default function (pi: ExtensionAPI) {
     getAvailableTypes().map(name => ({ name, description: getAgentConfig(name)?.description ?? name }));
 
   /**
+   * Route a prompt typed while FleetView shows `record`'s conversation in the
+   * main chat area, Claude Code's convention that a "focused" agent receives
+   * ordinary input, no `@handle` required. Steers it if still running or
+   * queued, resumes it if it finished. `false` when the agent never got a
+   * session at all, meaning there is nothing to route to, so the caller falls
+   * through to the main model rather than swallowing the message. Mirrors the
+   * `@handle` live-agent branch below, minus the toast: the transcript is
+   * already on screen, so the message arriving there is its own feedback.
+   */
+  async function routeToViewedAgent(ctx: ExtensionContext, record: AgentRecord, message: string): Promise<boolean> {
+    if (record.status === "running" || record.status === "queued") {
+      record.resultConsumed = false;
+      manager.steer(record.id, message);
+      pi.events.emit("subagents:steered", { id: record.id, message });
+      return true;
+    }
+    if (record.session) {
+      const config = getAgentConfig(record.type);
+      await startBackgroundResume(ctx, record, message, {
+        outputTranscript: config?.outputTranscript ?? getOutputTranscriptDefault(),
+        maxTurns: normalizeMaxTurns(config?.maxTurns ?? getDefaultMaxTurns()),
+      });
+      return true;
+    }
+    return false;
+  }
+
+  /**
    * `@handle message` typed at the prompt addresses that agent instead of the
    * main model — Claude Code's prompt mention, same grammar (see mention.ts).
    *
@@ -940,8 +956,27 @@ export default function (pi: ExtensionAPI) {
    */
   pi.on("input", async (event, ctx) => {
     // Never hijack text the extension layer itself submitted (pi.sendMessage,
-    // scheduled prompts) — only something a person typed can be a mention.
-    if (event.source === "extension" || !isAgentMentionsEnabled()) return { action: "continue" };
+    // scheduled prompts): only something a person typed can be a mention or
+    // routed to a viewed agent.
+    if (event.source === "extension") return { action: "continue" };
+
+    // FleetView showing an agent's conversation makes that agent the editor's
+    // target, independent of whether `@handle` mentions are enabled at all. An
+    // explicit `@handle`/`@main` still wins, since parseMention is checked
+    // first, so typing past the viewed agent is always possible. Slash input
+    // (skills, prompt templates) stays with the main session.
+    const trimmed = event.text.trim();
+    if (ctx.mode === "tui" && trimmed !== "" && !trimmed.startsWith("/") && !parseMention(event.text)) {
+      const viewed = fleet.getViewedRecord();
+      if (viewed) {
+        if (!await routeToViewedAgent(ctx, viewed, event.text)) {
+          ctx.ui.notify(`${viewed.type} has no session to resume; press Esc to return to main`, "warning");
+        }
+        return { action: "handled" };
+      }
+    }
+
+    if (!isAgentMentionsEnabled()) return { action: "continue" };
     // Claiming the turn is TUI only, matching the `@` completion that teaches
     // the syntax. Pi defaults `session.prompt()` to source "interactive", so a
     // headless `pi -p "@explore …"` reaches here too — and claiming it would
@@ -1134,6 +1169,9 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("session_before_switch", () => {
+    // The incoming session reuses the same document tree, so a swapped-in
+    // transcript left in place would keep showing stale content underneath it.
+    fleet.closeView();
     manager.clearCompleted(true);
     scheduler.stop();
   });
@@ -1235,17 +1273,6 @@ export default function (pi: ExtensionAPI) {
     return sent;
   }
 
-  /** The conversation viewer's `b`: hand just this run to the background. */
-  function backgroundActionFor(record: AgentRecord, notify: (message: string) => void): ViewerBackgroundAction {
-    return {
-      // Registered while the run is live, removed the moment its call returns.
-      available: () => foregroundHandoffs.has(record.id),
-      send: () => {
-        if (sendForegroundToBackground([record.id]) > 0) notify(`Sent "${record.description}" to the background.`);
-      },
-    };
-  }
-
   // Claude Code's ctrl+b (`task:background`): hand every running foreground
   // `Agent` call to the background. Claimed only while one is pending, so the
   // rest of the time — and whenever the prompt editor is not focused — the key
@@ -1260,9 +1287,8 @@ export default function (pi: ExtensionAPI) {
       // Kitty reports a release too, and matchesKey matches it — act on the
       // press only, or a refused handoff would be retried by its own release.
       if (isKeyRelease(data) || foregroundHandoffs.size === 0 || !matchesKey(data, "ctrl+b")) return undefined;
-      // Listeners run before the focused component, so a dialog or the
-      // viewer's composer would lose its ctrl+b (cursor-left). The viewer has
-      // its own `b`.
+      // Listeners run before the focused component, so a dialog would lose its
+      // ctrl+b (cursor-left).
       if (!fleet.editorHasFocus()) return undefined;
       const sent = sendForegroundToBackground(foregroundHandoffs.keys());
       if (sent > 0) ui.notify(`Sent ${sent === 1 ? "1 agent" : `${sent} agents`} to the background.`, "info");
@@ -1270,21 +1296,8 @@ export default function (pi: ExtensionAPI) {
     });
   }
 
-  /**
-   * pi's fullscreen scrollbar preference, read from the main session's live,
-   * trust-aware settings and normalized as pi's own `getFullscreenScrollbar()` does.
-   */
-  function getFullscreenScrollbar(): ScrollViewScrollbar {
-    const mode = pi.getSettings().fullscreenScrollbar;
-    return mode === "always" || mode === "hidden" ? mode : "auto";
-  }
-
   // Claude Code-style FleetView: navigable list of main + subagents below the editor.
-  // The trailing arguments keep a conversation overlay opened here identical to
-  // one opened from `/agents`: same settings on the way in, same persist out.
-  const fleet = new FleetList(manager, agentActivity, isShowCostEnabled, getViewerMarkdown,
-    (mode) => chooseViewerMarkdown(mode, currentCtx as unknown as ExtensionCommandContext | undefined),
-    getFullscreenScrollbar, backgroundActionFor);
+  const fleet = new FleetList(manager, isShowCostEnabled);
   let fleetViewEnabled = true;
   function isFleetViewEnabled(): boolean { return fleetViewEnabled; }
   function setFleetViewEnabled(b: boolean): void { fleetViewEnabled = b; fleet.setEnabled(b); }
@@ -1588,7 +1601,6 @@ export default function (pi: ExtensionAPI) {
       setReportUsage,
       setShowCost,
       setShowModel,
-      setViewerMarkdown,
       setPackageAgents: setPackageAgentsGate,
       setPackageWorkflows: setPackageWorkflowsGate,
     },
@@ -3339,37 +3351,17 @@ Terse command-style prompts produce shallow, generic work.
       return `${dn} (${a.description}) · ${a.toolUses} tools · ${a.status} · ${dur}`;
     });
     if (!record) return;
-
     await viewAgentConversation(ctx, record);
-    // Back-navigation: re-show the list
-    await showRunningAgents(ctx);
   }
 
-  async function viewAgentConversation(ctx: ExtensionCommandContext, record: AgentRecord) {
-    if (!record.session) {
-      ctx.ui.notify(`Agent is ${record.status === "queued" ? "queued" : "expired"} — no session available.`, "info");
-      return;
-    }
-
-    const session = record.session;
-    const activity = agentActivity.get(record.id);
-    let overlayOptions = getConversationOverlayOptions({ mode: "regular" });
-
-    await ctx.ui.custom<undefined>(
-      (tui, theme, keybindings, done) => {
-        overlayOptions = getConversationOverlayOptions(tui);
-        return new ConversationViewer(tui, session, record, activity, theme, done, () => {
-          if (manager.abort(record.id)) {
-            ctx.ui.notify(`Stopped "${record.description}".`, "info");
-          }
-        }, keybindings, (message: string) => manager.steer(record.id, message), showCost, getViewerMarkdown, (mode) => chooseViewerMarkdown(mode, ctx), getFullscreenScrollbar(),
-        backgroundActionFor(record, message => ctx.ui.notify(message, "info")));
-      },
-      {
-        overlay: true,
-        overlayOptions: () => overlayOptions,
-      },
-    );
+  /**
+   * Show `record`'s live conversation in pi's main chat area. The single
+   * entry point every UI surface uses (FleetView's own Enter key, this
+   * `/agents → Running agents` list, and the workflow dialog's `c`), so they
+   * cannot disagree on how a view opens.
+   */
+  function viewAgentConversation(_ctx: ExtensionCommandContext, record: AgentRecord): Promise<void> {
+    return fleet.viewAgent(record);
   }
 
   async function showAgentDetail(ctx: ExtensionCommandContext, name: string) {
@@ -3787,7 +3779,6 @@ Write the file using the write tool. Only write the file, nothing else.`;
       reportUsage: isReportUsageEnabled(),
       showCost: isShowCostEnabled(),
       showModel: isShowModelEnabled(),
-      viewerMarkdown: getViewerMarkdown(),
       packageAgents: getPackageAgentsGate(),
       packageWorkflows: getPackageWorkflowsGate(),
     } satisfies SubagentsSettings;
@@ -4004,14 +3995,6 @@ Write the file using the write tool. Only write the file, nothing else.`;
           values: ["on", "off"],
         },
         {
-          id: "viewerMarkdown",
-          label: "Viewer markdown",
-          description:
-            "How much of the conversation viewer renders as Markdown. assistant = assistant text only (default); all = tool results too, for tools that emit Markdown — accepting that a Markdown pass over a diff or a log eats `#` comments, swallows a `---` line and re-fences indented output; off = everything verbatim. `m` in the viewer cycles the same setting (footer: raw / md / md+).",
-          currentValue: getViewerMarkdown(),
-          values: ["off", "assistant", "all"],
-        },
-        {
           id: "fleetView",
           label: "Fleet view",
           description: "Claude Code-style main+subagents list below the editor (↓/← to navigate, Enter to view)",
@@ -4199,9 +4182,6 @@ Write the file using the write tool. Only write the file, nothing else.`;
         const enabled = value === "on";
         setShowModel(enabled);
         notifyApplied(ctx, `Model display ${enabled ? "enabled" : "disabled"}`);
-      } else if (id === "viewerMarkdown") {
-        setViewerMarkdown(value as ViewerMarkdownMode);
-        notifyApplied(ctx, `Viewer markdown set to ${value}`);
       } else if (id === "fleetView") {
         const enabled = value === "on";
         setFleetViewEnabled(enabled);
@@ -4308,31 +4288,6 @@ Write the file using the write tool. Only write the file, nothing else.`;
         input = await ctx.ui.input(label, trimmed);
       }
     }
-  }
-
-  // Persist the current snapshot, emit `subagents:settings_changed`, and surface
-  // the right toast. Successful saves show info; persistence failures downgrade
-  // to warning so users aren't silently reverted on restart. Event fires regardless
-  // of outcome so listeners see the in-memory change.
-  /**
-   * Persist + broadcast the settings, silent on success — for a change whose
-   * feedback is the UI it just changed: the viewer's `m` key, where a
-   * notification per press would talk over the overlay it is describing.
-   *
-   * A *failed* write still speaks. Every other settings path warns when the
-   * value is session-only, and swallowing it here would leave a preference
-   * looking persisted when the next session will not have it.
-   */
-  function persistSettings(ctx: ExtensionCommandContext | undefined, changeMsg: string): void {
-    const { message, level } = saveAndEmitChanged(
-      snapshotSettings(),
-      changeMsg,
-      (event, payload) => pi.events.emit(event, payload),
-    );
-    // `ctx` is absent only on the fleet path between sessions, where
-    // `currentCtx` has been cleared and there is no UI to carry the warning to.
-    // The write still happens.
-    if (level === "warning") ctx?.ui.notify(message, level);
   }
 
   function notifyApplied(ctx: ExtensionCommandContext, successMsg: string) {
