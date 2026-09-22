@@ -372,7 +372,7 @@ All fields are optional — sensible defaults for everything.
 | `isolated` | `false` | Hermetic specialist mode: forces `extensions: false` + `skills: false` + drops `ext:` selectors. Only built-in tools. Distinct from `isolation: worktree` (filesystem) |
 | `enabled` | `true` | Set to `false` to disable an agent (useful for hiding a default agent per-project) |
 
-Frontmatter is authoritative. If an agent file sets `model`, `thinking`, `max_turns`, `inherit_context`, `run_in_background`, `isolated`, or `isolation`, those values are locked for that agent. `Agent` tool parameters only fill fields the agent config leaves unspecified. Other spawn paths differ per field:
+Frontmatter is authoritative. If an agent file sets `model`, `thinking`, `inherit_context`, `run_in_background`, `isolated`, or `isolation`, those values are locked for that agent. `Agent` tool parameters only fill fields the agent config leaves unspecified. `max_turns` has no tool parameter at all: an agent's turn ceiling is its own `max_turns`, else the `defaultMaxTurns` setting, else unlimited. Other spawn paths differ per field:
 
 - `isolated` holds on every spawn path, including `@handle` mentions, workflows and [cross-extension RPC](https://github.com/tintinweb/pi-subagents/blob/master/docs/rpc.md).
 - `isolation` holds on every path except workflows: as in Claude Code, only the script's `agent()` option decides there.
@@ -507,7 +507,6 @@ Launch a sub-agent.
 | `subagent_type` | string | yes | Agent type (built-in or custom) |
 | `model` | string | no | Model — `provider/modelId` or fuzzy name (`"haiku"`, `"sonnet"`). Resolved tolerantly (`.`/`-` and a trailing date stamp interchangeable) with provider fallback |
 | `thinking` | string | no | Thinking level: off, minimal, low, medium, high, xhigh, max (availability depends on pi version and model) |
-| `max_turns` | number | no | Max agentic turns. Omit for unlimited (default) |
 | `run_in_background` | boolean | no | Defaults to `true`; `false` blocks and returns the result inline, until [`ctrl+b`](#sending-a-foreground-agent-to-the-background) hands it to the background |
 | `resume` | string | no | Agent ID to resume a previous session. The resumed run gets a fresh `max_turns` budget. Works after the agent's record is evicted (about ten minutes after it finishes) or lost to a reload: the agent is reopened from its saved session under the same id, running under its type's current definition and never in a new worktree. Refused, with the reason, when the session was never saved, its file is gone, or it ran in a worktree that held changes (the worktree was removed when the agent finished, and its changes are on the branch named in the result) |
 | `isolated` | boolean | no | No extension/MCP tools |

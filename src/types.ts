@@ -367,7 +367,6 @@ export interface ScheduledSubagent {
   prompt: string;
   model?: string;
   thinking?: ThinkingLevel;
-  max_turns?: number;
   isolated?: boolean;
   isolation?: IsolationMode;
 

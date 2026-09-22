@@ -17,6 +17,23 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { NO_FALLBACK, registerAgents, setFallbackSubagent } from "../src/agent-types.js";
 import { SubagentScheduler } from "../src/schedule.js";
 import { ScheduleStore } from "../src/schedule-store.js";
+import type { AgentConfig } from "../src/types.js";
+
+function makeAgentConfig(overrides: Partial<AgentConfig> = {}): AgentConfig {
+  return {
+    name: "budgeted",
+    description: "budgeted",
+    builtinToolNames: ["read"],
+    extensions: false,
+    skills: false,
+    systemPrompt: "budgeted",
+    promptMode: "replace",
+    inheritContext: false,
+    runInBackground: false,
+    isolated: false,
+    ...overrides,
+  };
+}
 
 function makeMockManager() {
   const spawnFn = vi.fn(() => "agent-" + Math.random().toString(36).slice(2, 10));
@@ -334,25 +351,43 @@ describe("SubagentScheduler — fire path", () => {
     scheduler.addJob({
       name: "every-1s", description: "x", schedule: "1s",
       subagent_type: "general-purpose", prompt: "x",
-      thinking: "high", max_turns: 12, isolated: true,
+      thinking: "high", isolated: true,
     });
 
     vi.advanceTimersByTime(1_000);
     const optsArg = manager.spawn.mock.calls[0][4];
     expect(optsArg.invocation).toEqual({
       thinking: "high",
-      maxTurns: 12,
+      maxTurns: undefined,
       isolated: true,
       runInBackground: true,
       isolation: undefined,
     });
   });
 
+  it("fire reads the turn budget off the agent file, not the job", () => {
+    // A job carries no turn cap. The agent's own `max_turns` is what the run
+    // enforces, so it is what the snapshot has to show.
+    registerAgents(new Map([["budgeted", makeAgentConfig({ maxTurns: 12 })]]));
+    scheduler.addJob({
+      name: "every-1s", description: "x", schedule: "1s",
+      subagent_type: "budgeted", prompt: "x",
+    });
+
+    vi.advanceTimersByTime(1_000);
+    const optsArg = manager.spawn.mock.calls[0][4];
+    expect(optsArg.invocation.maxTurns).toBe(12);
+    // Left off the spawn options so the runner resolves the same chain an
+    // immediate spawn does - agent file, then project default.
+    expect(optsArg.maxTurns).toBeUndefined();
+  });
+
   it("fire normalizes an unlimited turn budget out of the snapshot", () => {
     // 0 means unlimited; "max turns: 0" would read as a limit of none.
+    registerAgents(new Map([["unbudgeted", makeAgentConfig({ maxTurns: 0 })]]));
     scheduler.addJob({
       name: "unlimited", description: "x", schedule: "1s",
-      subagent_type: "general-purpose", prompt: "x", max_turns: 0,
+      subagent_type: "unbudgeted", prompt: "x",
     });
 
     vi.advanceTimersByTime(1_000);

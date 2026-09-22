@@ -20,7 +20,7 @@ import { Cron } from "croner";
 import { nanoid } from "nanoid";
 import type { AgentManager } from "./agent-manager.js";
 import { normalizeMaxTurns } from "./agent-runner.js";
-import { resolveSpawnType } from "./agent-types.js";
+import { getAgentConfig, resolveSpawnType } from "./agent-types.js";
 import { resolveModel } from "./model-resolver.js";
 import type { ScheduleStore } from "./schedule-store.js";
 import type { IsolationMode, ScheduledSubagent, SubagentType, ThinkingLevel } from "./types.js";
@@ -42,7 +42,6 @@ export interface NewJobInput {
   prompt: string;
   model?: string;
   thinking?: ThinkingLevel;
-  max_turns?: number;
   isolated?: boolean;
   isolation?: IsolationMode;
 }
@@ -105,7 +104,6 @@ export class SubagentScheduler {
       prompt: input.prompt,
       model: input.model,
       thinking: input.thinking,
-      max_turns: input.max_turns,
       isolated: input.isolated,
       isolation: input.isolation,
       enabled: true,
@@ -253,7 +251,6 @@ export class SubagentScheduler {
         isBackground: true,
         bypassQueue: true,
         model: resolvedModel,
-        maxTurns: job.max_turns,
         isolated: job.isolated,
         thinkingLevel: job.thinking,
         isolation: job.isolation,
@@ -264,9 +261,10 @@ export class SubagentScheduler {
         // would only be right until then.
         invocation: {
           thinking: job.thinking,
-          // Normalized like the Agent tool's own snapshot: `0` means unlimited,
-          // and rendering it as "max turns: 0" would read as a limit of none.
-          maxTurns: normalizeMaxTurns(job.max_turns),
+          // A job carries no turn cap, so the agent file's own is what the run
+          // enforces. Normalized like the Agent tool's snapshot: `0` means
+          // unlimited, and "max turns: 0" would read as a limit of none.
+          maxTurns: normalizeMaxTurns(getAgentConfig(dispatch.type)?.maxTurns),
           isolated: job.isolated,
           runInBackground: true,
           isolation: job.isolation,

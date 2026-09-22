@@ -15,7 +15,7 @@
  * agents bypass the pool, so the limit only started applying to ordinary
  * parallel work once background became the default.
  */
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../src/agent-runner.js", async () => {
   const actual = await vi.importActual<typeof import("../src/agent-runner.js")>("../src/agent-runner.js");
@@ -24,6 +24,7 @@ vi.mock("../src/agent-runner.js", async () => {
 
 import { runAgent } from "../src/agent-runner.js";
 import subagentsExtension from "../src/index.js";
+import { hermeticDir } from "./helpers/boot-extension.js";
 
 function makePi() {
   const tools = new Map<string, any>();
@@ -78,6 +79,19 @@ function spawn(tools: Map<string, any>, params: Record<string, unknown> = {}) {
 }
 
 describe("backgroundByDefault", () => {
+  // Concurrency limits decide what this file asserts, and the extension reads
+  // them from the developer's own `<agentDir>/subagents.json` at boot. Redirect
+  // cwd, the agent dir and HOME so the settings under test are the defaults.
+  let hermetic: ReturnType<typeof hermeticDir>;
+
+  beforeEach(() => {
+    hermetic = hermeticDir();
+  });
+
+  afterEach(() => {
+    hermetic.restore();
+  });
+
   it("returns an agent ID, not the result, when the call doesn't specify", async () => {
     const { pi, tools } = makePi();
     subagentsExtension(pi);

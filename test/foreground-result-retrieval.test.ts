@@ -31,7 +31,7 @@ vi.mock("../src/agent-runner.js", async () => {
   return { ...actual, runAgent: vi.fn() };
 });
 
-import { runAgent } from "../src/agent-runner.js";
+import { getDefaultMaxTurns, runAgent, setDefaultMaxTurns } from "../src/agent-runner.js";
 import subagentsExtension from "../src/index.js";
 
 function makePi() {
@@ -71,9 +71,10 @@ const textOf = (r: any): string => r.content[0].text;
 
 /**
  * Run a FOREGROUND agent that wraps up at the turn limit — the exact #174
- * shape. `steered: true` is what agent-manager turns into status "steered",
- * which is what produces the reporter's "(wrapped up at the turn limit —
- * output may be partial)" note.
+ * shape. The limit itself is the project's `defaultMaxTurns`, the only place a
+ * spawn can get one besides the agent file. `steered: true` is what
+ * agent-manager turns into status "steered", which is what produces the
+ * reporter's "(wrapped up at the turn limit — output may be partial)" note.
  *
  * Returns the tool result plus the id read out of `details` — the only place
  * a foreground id exists, which is the point of test 2.
@@ -91,7 +92,6 @@ async function runForegroundSteeredAgent(tools: Map<string, any>) {
       prompt: "Perform a very thorough read-only codebase exploration.",
       description: "Locate organization-scope changes",
       subagent_type: "Explore",
-      max_turns: 20,
       run_in_background: false,
     },
     undefined,
@@ -109,24 +109,31 @@ describe("issue #174: foreground agent that hits max_turns", () => {
   let prevCwd: string;
   let prevAgentDir: string | undefined;
   let prevHome: string | undefined;
+  let prevDefaultMaxTurns: number | undefined;
 
   beforeEach(() => {
     // Hermetic cwd + global dir, scheduling off — same isolation as
     // clear-completed-wiring.test.ts, so session_start doesn't spin a
-    // scheduler or touch the dev's filesystem.
+    // scheduler or touch the dev's filesystem. `defaultMaxTurns` is what gives
+    // the spawn a turn limit to wrap up at; the extension applies it at boot.
     tmpDir = mkdtempSync(join(tmpdir(), "pi-174-"));
     agentDir = mkdtempSync(join(tmpdir(), "pi-174-agentdir-"));
     prevAgentDir = process.env.PI_CODING_AGENT_DIR;
     prevHome = process.env.HOME;
+    prevDefaultMaxTurns = getDefaultMaxTurns();
     process.env.PI_CODING_AGENT_DIR = agentDir;
     process.env.HOME = agentDir;
     prevCwd = process.cwd();
     mkdirSync(join(tmpDir, ".pi"), { recursive: true });
-    writeFileSync(join(tmpDir, ".pi", "subagents.json"), JSON.stringify({ schedulingEnabled: false }));
+    writeFileSync(
+      join(tmpDir, ".pi", "subagents.json"),
+      JSON.stringify({ schedulingEnabled: false, defaultMaxTurns: 20 }),
+    );
     process.chdir(tmpDir);
   });
 
   afterEach(() => {
+    setDefaultMaxTurns(prevDefaultMaxTurns);
     process.chdir(prevCwd);
     if (prevAgentDir == null) delete process.env.PI_CODING_AGENT_DIR;
     else process.env.PI_CODING_AGENT_DIR = prevAgentDir;

@@ -33,7 +33,6 @@ describe("resolveAgentInvocationConfig", () => {
       {
         model: "provider/param-model",
         thinking: "minimal",
-        max_turns: 1,
         inherit_context: true,
         run_in_background: true,
         isolated: true,
@@ -55,7 +54,6 @@ describe("resolveAgentInvocationConfig", () => {
     const resolved = resolveAgentInvocationConfig(undefined, {
       model: "provider/param-model",
       thinking: "minimal",
-      max_turns: 3,
       inherit_context: true,
       run_in_background: true,
       isolated: true,
@@ -65,11 +63,22 @@ describe("resolveAgentInvocationConfig", () => {
     expect(resolved.modelInput).toBe("provider/param-model");
     expect(resolved.modelFromParams).toBe(true);
     expect(resolved.thinking).toBe("minimal");
-    expect(resolved.maxTurns).toBe(3);
     expect(resolved.inheritContext).toBe(true);
     expect(resolved.runInBackground).toBe(true);
     expect(resolved.isolated).toBe(true);
     expect(resolved.isolation).toBe("worktree");
+  });
+
+  // A turn cap comes from the agent file and the `defaultMaxTurns` setting only.
+  // Neither tool schema declares `max_turns`, but TypeBox rejects no undeclared
+  // key and the cross-extension RPC path is unvalidated, so a `max_turns` can
+  // still arrive here - and must not become a limit nobody configured.
+  it("ignores a caller-supplied max_turns", () => {
+    const callerCap = { max_turns: 1 } as Parameters<typeof resolveAgentInvocationConfig>[1];
+
+    expect(resolveAgentInvocationConfig(makeConfig({ maxTurns: 42 }), callerCap).maxTurns).toBe(42);
+    expect(resolveAgentInvocationConfig(makeConfig(), callerCap).maxTurns).toBeUndefined();
+    expect(resolveAgentInvocationConfig(undefined, callerCap).maxTurns).toBeUndefined();
   });
 
   it("lets parent fill in booleans when config leaves them undefined", () => {

@@ -20,7 +20,6 @@ vi.mock("../src/agent-runner.js", async () => {
   return { ...actual, runAgent: vi.fn() };
 });
 
-import { getDefaultMaxTurns, normalizeMaxTurns } from "../src/agent-runner.js";
 import subagentsExtension from "../src/index.js";
 import { resolveStorePath, ScheduleStore } from "../src/schedule-store.js";
 import type { ScheduledSubagent } from "../src/types.js";
@@ -84,26 +83,17 @@ describe("Agent tool → persisted scheduled job", () => {
     }
   });
 
-  it("persists the normalized turn limit, not the raw parameter", async () => {
-    // max_turns goes through normalizeMaxTurns and the agent-config/default
-    // fallback chain before it is stored. Persisting the raw param instead
-    // would give the scheduled run a different limit from an identical
-    // immediate run — and only at fire time.
+  it("persists no turn cap, even when the call carries one", async () => {
+    // The Agent tool schema declares no `max_turns` and TypeBox rejects no
+    // undeclared key, so a model that emits one anyway must not end up
+    // configuring the job with it. The run resolves its cap at fire time from
+    // the agent file and the project default, like any immediate spawn.
     const { job, restore } = await scheduleAndReadBack({
       subagent_type: "general-purpose",
-      max_turns: 0, // 0 means "unlimited", not "zero turns"
+      max_turns: 12,
     });
     try {
-      expect(job.max_turns).toBe(normalizeMaxTurns(0));
-    } finally {
-      restore();
-    }
-  });
-
-  it("falls back to the configured default turn limit when the call omits one", async () => {
-    const { job, restore } = await scheduleAndReadBack({ subagent_type: "general-purpose" });
-    try {
-      expect(job.max_turns).toBe(normalizeMaxTurns(getDefaultMaxTurns()));
+      expect(Object.keys(job)).not.toContain("max_turns");
     } finally {
       restore();
     }

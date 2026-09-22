@@ -1795,12 +1795,6 @@ Terse command-style prompts produce shallow, generic work.
           description: `Thinking level: ${THINKING_LEVELS.join(", ")}. Overrides agent default.`,
         }),
       ),
-      max_turns: Type.Optional(
-        Type.Number({
-          description: "Maximum number of agentic turns before stopping. Omit for unlimited (default).",
-          minimum: 1,
-        }),
-      ),
       run_in_background: Type.Optional(
         Type.Boolean({
           description: "Defaults to true — the agent runs detached, returning its ID immediately, and you are notified on completion. Set false only when your very next action depends on the result; the call then blocks and returns the agent's full output inline.",
@@ -2103,8 +2097,9 @@ Terse command-style prompts produce shallow, generic work.
         // disclose a parameter that was accepted but could not take effect (#182).
         requestedThinking: resolvedConfig.overridden?.thinking,
         requestedModel: askedModel,
-        // Explicit value only — the default fallback would just add noise.
-        // Normalize so `0` (unlimited) doesn't surface as a misleading "max turns: 0".
+        // The agent file's own value only - folding in the project default
+        // would tag every spawn. Normalize so `0` (unlimited) doesn't surface
+        // as a misleading "max turns: 0".
         maxTurns: normalizeMaxTurns(resolvedConfig.maxTurns),
         isolated,
         // Neither is applied to a reopened conversation (runAgent, the
@@ -2181,7 +2176,6 @@ Terse command-style prompts produce shallow, generic work.
             prompt: params.prompt as string,
             model: params.model as string | undefined,
             thinking: thinking,
-            max_turns: effectiveMaxTurns,
             isolated: isolated,
             isolation: isolation,
           });
