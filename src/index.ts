@@ -1235,7 +1235,10 @@ export default function (pi: ExtensionAPI) {
   // everything else; "off" = hide the widget entirely. Read live at render time.
   let widgetMode: WidgetMode = "background";
   function getWidgetMode(): WidgetMode { return widgetMode; }
-  const widget = new AgentWidget(manager, agentActivity, getWidgetMode, isShowCostEnabled, isShowModelEnabled);
+  // The fan-out belongs to the main transcript: while a subagent's conversation
+  // occupies the chat area, the widget yields the screen and comes back on close.
+  function isAgentViewOpen(): boolean { return fleet.isViewingAgent(); }
+  const widget = new AgentWidget(manager, agentActivity, getWidgetMode, isShowCostEnabled, isShowModelEnabled, isAgentViewOpen);
   function setWidgetMode(m: WidgetMode): void { widgetMode = m; widget.update(); }
 
   /**
@@ -1302,6 +1305,7 @@ export default function (pi: ExtensionAPI) {
 
   // Claude Code-style FleetView: navigable list of main + subagents below the editor.
   const fleet = new FleetList(manager, isShowCostEnabled);
+  fleet.setOnViewChange(() => widget.update());
   let fleetViewEnabled = true;
   function isFleetViewEnabled(): boolean { return fleetViewEnabled; }
   function setFleetViewEnabled(b: boolean): void { fleetViewEnabled = b; fleet.setEnabled(b); }

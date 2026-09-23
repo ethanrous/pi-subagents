@@ -14,7 +14,7 @@ import { getLifetimeCost, getLifetimeTotal, getSessionContextPercent, type Lifet
 
 // ---- Constants ----
 
-/** Maximum number of rendered lines before overflow collapse kicks in. */
+/** Maximum number of content rows (heading included, trailing spacer excluded) before overflow collapse kicks in. */
 const MAX_WIDGET_LINES = 12;
 
 /** Braille spinner frames for animated running indicator. */
@@ -292,6 +292,13 @@ export class AgentWidget {
      * conversation viewer unconditionally.
      */
     private showModel: () => boolean = () => false,
+    /**
+     * Read live at update and render time. True while another surface owns
+     * the screen the widget would sit above - the extension supplies "an
+     * agent's conversation is open in the main chat area", since the fan-out
+     * belongs to the parent transcript, not the child's.
+     */
+    private hidden: () => boolean = () => false,
   ) {}
 
   /**
@@ -417,6 +424,7 @@ export class AgentWidget {
    * reading live state each time instead of capturing it in a closure.
    */
   private renderWidget(tui: any, theme: Theme): string[] {
+    if (this.hidden()) return [];
     const allAgents = this.widgetAgents();
     const running = allAgents.filter(a => a.status === "running");
     const queued = allAgents.filter(a => a.status === "queued");
@@ -570,6 +578,8 @@ export class AgentWidget {
       );
     }
 
+    // Blank row between the fan-out and the editor's top border.
+    lines.push("");
     return lines;
   }
 
@@ -620,6 +630,16 @@ export class AgentWidget {
     if (newStatusText !== this.lastStatusText) {
       this.uiCtx.setStatus("subagents", newStatusText);
       this.lastStatusText = newStatusText;
+    }
+
+    // The status bar count stays; only the above-editor block yields the screen.
+    if (this.hidden()) {
+      if (this.widgetRegistered) {
+        this.uiCtx.setWidget("agents", undefined);
+        this.widgetRegistered = false;
+        this.tui = undefined;
+      }
+      return;
     }
 
     this.widgetFrame++;

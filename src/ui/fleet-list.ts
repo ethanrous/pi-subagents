@@ -17,7 +17,7 @@
  * modal overlay, so the list still defers to it while it is open.
  */
 
-import { isKeyRelease, Key, matchesKey, type TUI, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { CURSOR_MARKER, Editor, isKeyRelease, Key, matchesKey, type TUI, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { hasAgentBadge, renderAgentName } from "../agent-color.js";
 import { type AgentManager, isTopLevelAgent } from "../agent-manager.js";
 import type { AgentRecord } from "../types.js";
@@ -33,6 +33,19 @@ const MAX_AGENT_ROWS = 5;
 const TICK_MS = 200;
 /** How long a finished agent lingers in the list before it drops out. */
 const FINISHED_LINGER_MS = 4000;
+
+/**
+ * The block pi-tui's `Editor` paints at the cursor of an empty prompt: an
+ * inverse-video space, preceded by the zero-width hardware-cursor marker while
+ * the editor is focused. The list only ever navigates at an empty prompt, so
+ * this is the only form the cursor takes while it is hidden.
+ */
+const EMPTY_PROMPT_CURSOR = "\x1b[7m \x1b[0m";
+
+/** A rendered editor line with its cursor block turned back into the space it covers. */
+function withoutPromptCursor(line: string): string {
+  return line.replaceAll(CURSOR_MARKER + EMPTY_PROMPT_CURSOR, " ").replaceAll(EMPTY_PROMPT_CURSOR, " ");
+}
 
 /** Minimal UI surface the FleetView needs from `ctx.ui` (structural subset). */
 export type FleetUICtx = ToolsExpandedAccess & {
@@ -118,6 +131,17 @@ export class FleetList {
   private currentView: AgentView | undefined;
   /** The id of the agent whose conversation is currently shown in the main window. */
   private viewedAgentId: string | undefined;
+  /** Runs after a view opens or closes; the extension refreshes surfaces that depend on which transcript is on screen. */
+  private onViewChange: (() => void) | undefined;
+
+  /**
+   * The prompt editor whose render is wrapped while the list is active, and the
+   * `render` it had before. Navigation never moves focus out of the editor, so
+   * pi keeps painting its cursor block in the prompt; wrapping the focused
+   * editor's render strips that block so the screen shows one cursor: `●`.
+   */
+  private cursorHiddenEditor: Editor | undefined;
+  private cursorHiddenRender: Editor["render"] | undefined;
 
   /** Injected by the extension; absent until workflows are wired (or at all). */
   private workflowSource: (() => readonly FleetWorkflow[]) | undefined;
@@ -145,8 +169,13 @@ export class FleetList {
   setEnabled(enabled: boolean): void {
     if (enabled === this.enabled) return;
     this.enabled = enabled;
-    if (!enabled) this.active = false;
+    if (!enabled) this.setActive(false);
     this.update();
+  }
+
+  /** Register the hook that runs whenever a view opens or closes. */
+  setOnViewChange(handler: (() => void) | undefined): void {
+    this.onViewChange = handler;
   }
 
   /** Capture the UI context and (re)register the global input handler. */
@@ -193,6 +222,7 @@ export class FleetList {
     this.currentView?.close();
     this.currentView = undefined;
     this.viewedAgentId = undefined;
+    this.onViewChange?.();
   }
 
   dispose(): void {
@@ -205,9 +235,9 @@ export class FleetList {
     this.viewingWorkflowId = undefined;
     if (this.ui && this.widgetRegistered) this.ui.setWidget(FLEET_KEY, undefined);
     this.widgetRegistered = false;
+    this.setActive(false);
     this.tui = undefined;
     this.theme = undefined;
-    this.active = false;
     this.ui = undefined;
   }
 
@@ -235,7 +265,7 @@ export class FleetList {
         this.tui = undefined;
       }
       if (this.timer) { clearInterval(this.timer); this.timer = undefined; }
-      this.active = false;
+      this.setActive(false);
       this.selectedIndex = 0;
       return;
     }
@@ -364,7 +394,7 @@ export class FleetList {
       // workflow run still has somewhere to go, and requiring an agent would
       // render the row but refuse to move into it.
       if (isActivator && this.roster().length > 1 && this.ui.getEditorText() === "") {
-        this.active = true;
+        this.setActive(true);
         this.selectedIndex = 0;
         this.update();
         return { consume: true };
@@ -427,10 +457,44 @@ export class FleetList {
   }
 
   private deactivate(): void {
-    this.active = false;
+    this.setActive(false);
     this.selectedIndex = 0;
     this.stopArmed = false;
     this.update();
+  }
+
+  /** Flip navigation on or off, hiding the prompt cursor exactly while it is on. */
+  private setActive(active: boolean): void {
+    this.active = active;
+    if (active) this.hideEditorCursor();
+    else this.restoreEditorCursor();
+  }
+
+  /**
+   * Wrap the focused editor's `render` so its cursor block is stripped. Only a
+   * real `Editor` is wrapped, which is what `editorHasFocus()` has already
+   * established by the time the list activates; with no `tui` seen yet there is
+   * nothing to reach, and the cursor stays.
+   */
+  private hideEditorCursor(): void {
+    if (this.cursorHiddenEditor) return;
+    const focused = (this.tui as { focusedComponent?: unknown } | undefined)?.focusedComponent;
+    if (!(focused instanceof Editor)) return;
+    const original = focused.render;
+    focused.render = (width: number) => original.call(focused, width).map(withoutPromptCursor);
+    this.cursorHiddenEditor = focused;
+    this.cursorHiddenRender = original;
+  }
+
+  /** Put the editor's own `render` back: the inherited method if that is what it had, else the own property. */
+  private restoreEditorCursor(): void {
+    const editor = this.cursorHiddenEditor;
+    const original = this.cursorHiddenRender;
+    this.cursorHiddenEditor = undefined;
+    this.cursorHiddenRender = undefined;
+    if (!editor || !original) return;
+    if (original === Object.getPrototypeOf(editor).render) delete (editor as { render?: Editor["render"] }).render;
+    else editor.render = original;
   }
 
   private openSelected(): void {
@@ -489,6 +553,7 @@ export class FleetList {
     }
     this.currentView = view;
     this.viewedAgentId = record.id;
+    this.onViewChange?.();
     this.update();
   }
 

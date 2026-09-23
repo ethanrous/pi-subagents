@@ -1,5 +1,5 @@
 import { initTheme } from "@earendil-works/pi-coding-agent";
-import { type Component, Editor, visibleWidth } from "@earendil-works/pi-tui";
+import { type Component, CURSOR_MARKER, Editor, visibleWidth } from "@earendil-works/pi-tui";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentManager } from "../src/agent-manager.js";
 import { registerAgents } from "../src/agent-types.js";
@@ -425,6 +425,112 @@ describe("FleetList vs other focused components (#123)", () => {
     const h = harness([makeRecord()]);
     // No render yet → the list has never seen a tui: activation must still work.
     expect(h.press(DOWN)).toEqual({ consume: true });
+  });
+});
+
+describe("FleetList hides the prompt cursor while navigating", () => {
+  const CURSOR_BLOCK = "\x1b[7m \x1b[0m";
+
+  /** A real, focused Editor with enough of a tui to render (pi's CustomEditor extends it). */
+  function focusedEditor(): Editor {
+    const fakeTui = { requestRender: () => {}, terminal: { columns: 120, rows: 40 } };
+    const theme = { borderColor: (s: string) => s, selectList: {} };
+    const editor = new Editor(fakeTui as any, theme as any);
+    editor.focused = true;
+    return editor;
+  }
+
+  function focusInHarness(h: Harness, focused: unknown): void {
+    h.widgetTui.focusedComponent = focused;
+    h.render();
+  }
+
+  const joined = (editor: Editor) => editor.render(40).join("\n");
+
+  it("strips the editor's cursor block and hardware marker while active, and puts them back on esc", () => {
+    const editor = focusedEditor();
+    const h = harness([makeRecord()]);
+    focusInHarness(h, editor);
+    const before = editor.render(40);
+    expect(before.join("\n")).toContain(CURSOR_MARKER + CURSOR_BLOCK);
+
+    h.press(DOWN);
+    const during = editor.render(40);
+    expect(during.join("\n")).not.toContain("\x1b[7m");
+    expect(during.join("\n")).not.toContain(CURSOR_MARKER);
+    // Same line count and visible width: only the cursor styling changed.
+    expect(during.map(visibleWidth)).toEqual(before.map(visibleWidth));
+
+    h.press(ESC);
+    expect(joined(editor)).toContain(CURSOR_MARKER + CURSOR_BLOCK);
+    // Editor.render is inherited; the wrapper must not leave an own property behind.
+    expect(Object.hasOwn(editor, "render")).toBe(false);
+  });
+
+  it("restores the cursor when a typed key hands the prompt back to the editor", () => {
+    const editor = focusedEditor();
+    const h = harness([makeRecord()]);
+    focusInHarness(h, editor);
+    h.press(DOWN);
+    expect(joined(editor)).not.toContain(CURSOR_BLOCK);
+    expect(h.press("a")).toBeUndefined(); // flows to the editor
+    expect(joined(editor)).toContain(CURSOR_BLOCK);
+  });
+
+  it("restores the cursor when another component takes focus", () => {
+    const editor = focusedEditor();
+    const h = harness([makeRecord()]);
+    focusInHarness(h, editor);
+    h.press(DOWN);
+    expect(joined(editor)).not.toContain(CURSOR_BLOCK);
+    focusInHarness(h, { kind: "selector" });
+    h.press(DOWN);
+    expect(joined(editor)).toContain(CURSOR_BLOCK);
+  });
+
+  it("keeps the cursor hidden while the view opened from the list is still being navigated", async () => {
+    const editor = focusedEditor();
+    const h = harness([makeRecord()]);
+    focusInHarness(h, editor);
+    h.press(DOWN);
+    h.press(DOWN);
+    h.press(ENTER);
+    await h.flush();
+    expect(h.isViewingAgent()).toBe(true);
+    expect(joined(editor)).not.toContain(CURSOR_BLOCK);
+    h.press(ESC);
+    expect(h.isViewingAgent()).toBe(false);
+    expect(joined(editor)).toContain(CURSOR_BLOCK);
+  });
+
+  it("restores the cursor on dispose", () => {
+    const editor = focusedEditor();
+    const h = harness([makeRecord()]);
+    focusInHarness(h, editor);
+    h.press(DOWN);
+    h.fleet.dispose();
+    expect(joined(editor)).toContain(CURSOR_BLOCK);
+  });
+});
+
+describe("FleetList view-change hook", () => {
+  it("fires once when a view opens and once when it closes", async () => {
+    const h = harness([makeRecord()]);
+    const onViewChange = vi.fn();
+    h.fleet.setOnViewChange(onViewChange);
+    h.press(DOWN);
+    h.press(DOWN);
+    expect(onViewChange).not.toHaveBeenCalled(); // navigating alone changes nothing on screen
+    h.press(ENTER);
+    await h.flush();
+    expect(h.fleet.isViewingAgent()).toBe(true);
+    expect(onViewChange).toHaveBeenCalledTimes(1);
+    h.press(ESC);
+    expect(h.fleet.isViewingAgent()).toBe(false);
+    expect(onViewChange).toHaveBeenCalledTimes(2);
+    // Closing an already-closed view is a no-op for the hook too.
+    h.fleet.closeView();
+    expect(onViewChange).toHaveBeenCalledTimes(2);
   });
 });
 

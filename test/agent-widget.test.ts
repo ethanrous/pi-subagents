@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { renderRunningAgentStatus } from "../src/index.js";
 import type { WidgetMode } from "../src/types.js";
 import { type AgentActivity, AgentWidget, fgPreservingNestedStyles, formatCost, formatSessionTokens } from "../src/ui/agent-widget.js";
@@ -106,6 +106,51 @@ describe("AgentWidget", () => {
       .render()
       .join("\n");
   }
+
+  it("ends with a blank line so the editor border does not sit flush under the fan-out", () => {
+    const manager = { listAgents: () => [makeRecord("bg", { isBackground: true })] };
+    const lines = renderLines(manager, "bg", () => "background").split("\n");
+    expect(lines.at(-1)).toBe("");
+    expect(lines.at(-2)).not.toBe("");
+  });
+
+  // The fan-out belongs to the parent's transcript. While a subagent's
+  // conversation occupies the chat area the block yields the screen; the
+  // status-bar count is the parent's too, but it lives in pi's footer, not
+  // above the child's transcript, so it stays.
+  it("yields the above-editor slot while hidden and returns when shown again", () => {
+    let hidden = false;
+    const manager = { listAgents: () => [makeRecord("bg", { isBackground: true })] };
+    const widget = new AgentWidget(
+      manager as any,
+      new Map([["bg", makeActivity()]]),
+      () => "background",
+      () => false,
+      () => false,
+      () => hidden,
+    );
+    const setWidget = vi.fn();
+    const setStatus = vi.fn();
+    widget.setUICtx({ setStatus, setWidget });
+
+    widget.update();
+    expect(typeof setWidget.mock.calls.at(-1)?.[1]).toBe("function");
+    const factory = setWidget.mock.calls.at(-1)?.[1];
+    const tui = { terminal: { columns: 120 }, requestRender: () => {} };
+    expect(factory(tui, theme).render().join("\n")).toContain("bg description");
+
+    hidden = true;
+    widget.update();
+    expect(setWidget).toHaveBeenLastCalledWith("agents", undefined);
+    expect(setStatus).toHaveBeenLastCalledWith("subagents", "1 running agent");
+    // A render pi issues before the unregister lands draws nothing.
+    expect(factory(tui, theme).render()).toEqual([]);
+
+    hidden = false;
+    widget.update();
+    expect(typeof setWidget.mock.calls.at(-1)?.[1]).toBe("function");
+    expect(setWidget.mock.calls.at(-1)?.[1](tui, theme).render().join("\n")).toContain("bg description");
+  });
 
   // "all" (and the no-policy constructor default) shows every agent.
   it("shows foreground agents in 'all' mode (and by default)", () => {
@@ -402,7 +447,7 @@ describe("AgentWidget overflow accounting", () => {
     };
   }
 
-  /** Render a whole fleet (mixed statuses) and return the produced lines. */
+  /** Render a whole fleet (mixed statuses) and return its content rows, without the trailing spacer. */
   function renderFleet(counts: { running: number; queued: number; finished: number }): string[] {
     const agents = [
       ...Array.from({ length: counts.running }, (_, i) => record(`run${i}`, "running")),
@@ -420,7 +465,8 @@ describe("AgentWidget overflow accounting", () => {
     widget.setUICtx({ setStatus: () => {}, setWidget: (_k, c) => { factory = c; } } as any);
     widget.update();
     if (!factory) return [];
-    return factory({ terminal: { columns: 200 }, requestRender: () => {} }, theme).render();
+    const lines: string[] = factory({ terminal: { columns: 200 }, requestRender: () => {} }, theme).render();
+    return lines.at(-1) === "" ? lines.slice(0, -1) : lines;
   }
 
   /** The `+N more (…)` footer, if the widget overflowed. */

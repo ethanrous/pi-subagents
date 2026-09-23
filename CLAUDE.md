@@ -45,6 +45,8 @@ The governing rule: **the subagent view must not differ from the main view, visu
 - `●` marks the keyboard cursor, only while the list is active. `◉` marks the conversation on screen (`main` by default). Row text (including `main`) is bright only when the row is hovered or on screen, otherwise muted (`isHighlighted`).
 - Esc at an empty prompt or selecting `main` restores the main chat. The view also closes on `session_before_switch`, `session_shutdown`, and when the viewed record is evicted.
 - `x x` stops the selected running or queued agent.
+- While the list is active the focused `Editor`'s `render` is wrapped (`hideEditorCursor`) to strip pi-tui's inverse-video cursor block, so the prompt shows no cursor while `●` is the cursor. Every path that clears `active` goes through `setActive(false)`, which restores the original `render`.
+- `setOnViewChange` fires after a view opens or closes; the extension uses it to refresh `AgentWidget`, whose `hidden` predicate is `fleet.isViewingAgent()`, so the parent's `Agents` fan-out is not drawn above a child's transcript.
 
 ### Input routing (`src/index.ts`)
 
