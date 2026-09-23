@@ -31,7 +31,7 @@ import { GroupJoinManager } from "./group-join.js";
 import { isolationParam, resolveAgentInvocationConfig, resolveJoinMode } from "./invocation-config.js";
 import { describeMention, handleBase, isReservedHandle, parseMention, resolveHandleToType, stripAgentPrefix } from "./mention.js";
 import { runMentionClone } from "./mention-clone.js";
-import { describeModel, type ModelRegistry, resolveModel } from "./model-resolver.js";
+import { describeAvailableModels, describeModel, type ModelRegistry, resolveModel } from "./model-resolver.js";
 import { checkModelScope, isScopeModelsEnabled, setScopeModelsEnabled } from "./model-scope.js";
 import { getMaxSubagentDepth, setMaxSubagentDepth } from "./nested-tools.js";
 import { createOutputFilePath, ensureOutputFile, getOutputTranscriptDefault, sessionTaskDir, setOutputTranscriptDefault, streamToOutputFile, writeInitialEntry } from "./output-file.js";
@@ -837,6 +837,10 @@ export default function (pi: ExtensionAPI) {
       fleet.setUICtx(ctx.ui as any);
       watchHandoffKey(ctx.ui);
     }
+    // Re-register with the available models in the `model` parameter
+    // description. Registering under the same name replaces the definition and
+    // keeps the tool active.
+    pi.registerTool({ ...registeredAgentTool, parameters: agentToolParameters(describeAvailableModels(ctx)) });
     manager.clearCompleted(true);
     // Guard mirrors the `!scheduler.isActive()` pattern below: session_start
     // fires once per activation, but a double-bind must not leak listeners.
@@ -1752,23 +1756,10 @@ Terse command-style prompts produce shallow, generic work.
     return fullAgentToolDescription;
   })();
 
-  // Held rather than registered inline: the mention clone reuses this exact
-  // definition, so the agent it starts is an ordinary top-level spawn instead
-  // of a second implementation that has to be kept in step with this one.
-  const agentTool = defineTool({
-    name: SUBAGENT_TOOL_NAMES.AGENT,
-    label: "Agent",
-    description: agentToolDescription,
-    promptSnippet: "Launch autonomous sub-agents for complex multi-step tasks",
-    promptGuidelines: [
-      "Use Agent with specialized agents when the task matches an agent type's description. Subagents are valuable for parallelizing independent queries or for protecting the main context window from excessive results, but should not be used excessively when not needed. Importantly, avoid duplicating work that subagents are already doing — if you delegate research to a subagent, do not also perform the same searches yourself.",
-      // Names Explore only when it can be spawned, as Claude Code does (#330).
-      // Read at registration, like the type list in the description.
-      `For broad codebase exploration or research, spawn Agent with an appropriate subagent_type${getAvailableTypes().includes("Explore") ? " (e.g. Explore)" : ""}. Otherwise use direct tools (read, grep, find) when the target is already known.`,
-      "When an agent runs in the background, you will be notified on completion — do not poll or sleep waiting for it. Continue with other work instead.",
-      "Trust but verify: an agent's summary describes intent, not outcome. When an agent writes or edits code, check the actual changes before reporting work as done.",
-    ],
-    parameters: Type.Object({
+  // The model registry is only reachable from a session context, so the
+  // parameter schema is built once without the list and rebuilt with it on
+  // session_start, when the tool is re-registered.
+  const agentToolParameters = (availableModels?: string) => Type.Object({
       prompt: Type.String({
         description: "The task for the agent to perform.",
       }),
@@ -1787,7 +1778,8 @@ Terse command-style prompts produce shallow, generic work.
       model: Type.Optional(
         Type.String({
           description:
-            'Optional model override. Accepts "provider/modelId" or fuzzy name (e.g. "haiku", "sonnet"). Omit to use the agent type\'s default.',
+            'Optional model override; takes precedence over the agent type\'s default. Accepts "provider/modelId" or a fuzzy name (e.g. "haiku", "sonnet"). A name that matches none of the available models is rejected. Omit to use the agent type\'s default.'
+            + (availableModels ? `\n\nAvailable models:\n${availableModels}` : ""),
         }),
       ),
       thinking: Type.Optional(
@@ -1817,7 +1809,25 @@ Terse command-style prompts produce shallow, generic work.
       ),
       ...isolationParam(isWorktreeIsolationEnabled()),
       ...scheduleParam,
-    }),
+  });
+
+  // Held rather than registered inline: the mention clone reuses this exact
+  // definition, so the agent it starts is an ordinary top-level spawn instead
+  // of a second implementation that has to be kept in step with this one.
+  const agentTool = defineTool({
+    name: SUBAGENT_TOOL_NAMES.AGENT,
+    label: "Agent",
+    description: agentToolDescription,
+    promptSnippet: "Launch autonomous sub-agents for complex multi-step tasks",
+    promptGuidelines: [
+      "Use Agent with specialized agents when the task matches an agent type's description. Subagents are valuable for parallelizing independent queries or for protecting the main context window from excessive results, but should not be used excessively when not needed. Importantly, avoid duplicating work that subagents are already doing — if you delegate research to a subagent, do not also perform the same searches yourself.",
+      // Names Explore only when it can be spawned, as Claude Code does (#330).
+      // Read at registration, like the type list in the description.
+      `For broad codebase exploration or research, spawn Agent with an appropriate subagent_type${getAvailableTypes().includes("Explore") ? " (e.g. Explore)" : ""}. Otherwise use direct tools (read, grep, find) when the target is already known.`,
+      "When an agent runs in the background, you will be notified on completion — do not poll or sleep waiting for it. Continue with other work instead.",
+      "Trust but verify: an agent's summary describes intent, not outcome. When an agent writes or edits code, check the actual changes before reporting work as done.",
+    ],
+    parameters: agentToolParameters(),
 
     // ---- Custom rendering: Claude Code style ----
 
@@ -2020,13 +2030,14 @@ Terse command-style prompts produce shallow, generic work.
         defaultRunInBackground: getBackgroundByDefault(),
       });
 
-      // Resolve model from agent config first; tool-call params only fill gaps.
+      // A caller-supplied model that resolves to nothing is refused with the
+      // available list; an agent-file model that resolves to nothing falls back
+      // to the parent's.
       let model = ctx.model;
       if (resolvedConfig.modelInput) {
         const resolved = resolveModel(resolvedConfig.modelInput, ctx.modelRegistry);
         if (typeof resolved === "string") {
           if (resolvedConfig.modelFromParams) return textResult(resolved);
-          // config-specified: silent fallback to parent
         } else {
           model = resolved;
         }
@@ -2077,17 +2088,6 @@ Terse command-style prompts produce shallow, generic work.
       // This is the pre-session snapshot — agent-manager overwrites it with the
       // effective values the moment a session reports them.
       const { modelName, modelId } = model ? describeModel(model) : { modelName: undefined, modelId: undefined };
-      // What the caller SPELLED, kept only if it names a different model than the
-      // one that won. Model input is fuzzy — `"haiku"` and
-      // `"anthropic/claude-haiku-4-5"` are the same model — so comparing the two
-      // strings would disclose an override that never happened. A spelling that
-      // resolves to nothing is still worth disclosing: it cannot have taken effect.
-      const askedModel = ((asked: string | undefined) => {
-        if (!asked) return undefined;
-        const resolvedAsked = resolveModel(asked, ctx.modelRegistry);
-        if (typeof resolvedAsked === "string") return asked;
-        return resolvedAsked.provider === model?.provider && resolvedAsked.id === model?.id ? undefined : asked;
-      })(resolvedConfig.overridden?.model);
       const effectiveMaxTurns = normalizeMaxTurns(resolvedConfig.maxTurns ?? getDefaultMaxTurns());
       const agentInvocation: AgentInvocation = {
         modelName,
@@ -2095,8 +2095,8 @@ Terse command-style prompts produce shallow, generic work.
         thinking,
         // Only set where the agent file outranked the caller, so the surfaces can
         // disclose a parameter that was accepted but could not take effect (#182).
+        // No `requestedModel`: a caller's model is honored or the spawn is refused.
         requestedThinking: resolvedConfig.overridden?.thinking,
-        requestedModel: askedModel,
         // The agent file's own value only - folding in the project default
         // would tag every spawn. Normalize so `0` (unlimited) doesn't surface
         // as a misleading "max turns: 0".

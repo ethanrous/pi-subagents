@@ -232,7 +232,7 @@ describe("Agent tool result — effective model", () => {
     expect(result.details.tags).toContain("thinking: low (asked max)");
   });
 
-  it("discloses a model an agent file pinned over the caller's (#182)", async () => {
+  it("runs the caller's model over the one an agent file pinned", async () => {
     pinnedAgent("model: anthropic/claude-haiku-4-5\n");
     const tool = agentTool();
     vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}) as never);
@@ -251,20 +251,18 @@ describe("Agent tool result — effective model", () => {
       ctx(),
     );
 
-    expect(result.details.modelName).toBe("haiku 4.5 (asked anthropic/claude-opus-4-6)");
+    expect(result.details.modelName).toBe("opus 4.6");
+    expect(render(tool, result)).not.toContain("asked");
   });
 
-  it("stays quiet when the caller's spelling names the model that won", async () => {
-    // Model input is fuzzy: `"haiku"` and `"anthropic/claude-haiku-4-5"` are the
-    // same model, and the frontmatter did not take anything away from the
-    // caller. Comparing the raw strings would print "haiku 4.5 (asked haiku)".
+  it("runs the pinned model when the caller names none", async () => {
     pinnedAgent("model: anthropic/claude-haiku-4-5\n");
     const tool = agentTool();
     vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}) as never);
 
     const result = await tool.execute(
       "tc-5b",
-      { prompt: "go", description: "d", subagent_type: "pinned", model: "haiku", run_in_background: true },
+      { prompt: "go", description: "d", subagent_type: "pinned", run_in_background: true },
       undefined,
       undefined,
       ctx(),
@@ -273,10 +271,12 @@ describe("Agent tool result — effective model", () => {
     expect(result.details.modelName).toBe("haiku 4.5");
   });
 
-  it("discloses a spelling that names no available model at all", async () => {
+  it("refuses a spelling that names no available model, even when the agent file pins one", async () => {
+    // A name that resolves to nothing is a caller error: refuse with the
+    // available list instead of running the pinned model.
     pinnedAgent("model: anthropic/claude-haiku-4-5\n");
     const tool = agentTool();
-    vi.mocked(runAgent).mockImplementation(() => new Promise(() => {}) as never);
+    vi.mocked(runAgent).mockClear().mockImplementation(() => new Promise(() => {}) as never);
 
     const result = await tool.execute(
       "tc-5c",
@@ -286,7 +286,11 @@ describe("Agent tool result — effective model", () => {
       ctx(),
     );
 
-    expect(result.details.modelName).toBe("haiku 4.5 (asked gpt-9)");
+    expect(runAgent).not.toHaveBeenCalled();
+    const text = result.content.map((c: any) => c.text).join("\n");
+    expect(text).toContain('Model not found: "gpt-9"');
+    expect(text).toContain("anthropic/claude-haiku-4-5");
+    expect(text).toContain("anthropic/claude-opus-4-6");
   });
 
   it("says nothing about a request that was honored", async () => {
@@ -307,6 +311,36 @@ describe("Agent tool result — effective model", () => {
 
     expect(result.details.tags).toContain("thinking: high");
     expect(render(tool, result)).not.toContain("asked");
+  });
+});
+
+describe("Agent tool schema — available models", () => {
+  it("lists the available models in the model parameter once a session starts", async () => {
+    const tools = new Map<string, any>();
+    const handlers = new Map<string, (event: any, ctx: any) => Promise<void>>();
+    const pi = {
+      registerMessageRenderer: vi.fn(),
+      registerEntryRenderer: vi.fn(),
+      registerTool: vi.fn((tool: any) => tools.set(tool.name, tool)),
+      registerCommand: vi.fn(),
+      registerFlag: vi.fn(),
+      getFlag: vi.fn(),
+      getAllTools: vi.fn(() => [] as any[]),
+      setActiveTools: vi.fn(),
+      on: vi.fn((event: string, handler: any) => handlers.set(event, handler)),
+      events: { emit: vi.fn(), on: vi.fn(() => vi.fn()) },
+      appendEntry: vi.fn(),
+      sendMessage: vi.fn(),
+    } as any;
+    subagentsExtension(pi);
+
+    const before = tools.get("Agent").parameters.properties.model.description;
+    expect(before).not.toContain("Available models");
+
+    await handlers.get("session_start")!({ type: "session_start" }, ctx());
+
+    const after = tools.get("Agent").parameters.properties.model.description;
+    expect(after).toContain("Available models:\nanthropic: claude-haiku-4-5, claude-opus-4-6");
   });
 });
 

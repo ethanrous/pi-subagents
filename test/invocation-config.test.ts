@@ -40,8 +40,9 @@ describe("resolveAgentInvocationConfig", () => {
       },
     );
 
-    expect(resolved.modelInput).toBe("provider/config-model");
-    expect(resolved.modelFromParams).toBe(false);
+    // Model is the exception: the caller's override wins over the pin.
+    expect(resolved.modelInput).toBe("provider/param-model");
+    expect(resolved.modelFromParams).toBe(true);
     expect(resolved.thinking).toBe("high");
     expect(resolved.maxTurns).toBe(42);
     expect(resolved.inheritContext).toBe(false);
@@ -165,7 +166,19 @@ describe("resolveAgentInvocationConfig — overridden params (#182)", () => {
       { model: "provider/param-model", thinking: "max" },
     );
 
-    expect(resolved.overridden).toEqual({ thinking: "max", model: "provider/param-model" });
+    // Only thinking: the caller's model is honored, so it is never "overridden".
+    expect(resolved.overridden).toEqual({ thinking: "max" });
+    expect(resolved.modelInput).toBe("provider/param-model");
+  });
+
+  it("uses the agent file's model only when the caller named none", () => {
+    const resolved = resolveAgentInvocationConfig(
+      makeConfig({ model: "provider/config-model" }),
+      {},
+    );
+
+    expect(resolved.modelInput).toBe("provider/config-model");
+    expect(resolved.modelFromParams).toBe(false);
   });
 
   it("records nothing when the caller got what they asked for", () => {
@@ -197,6 +210,6 @@ describe("resolveAgentInvocationConfig — overridden params (#182)", () => {
       { model: "provider/param-model", thinking: "max" },
     );
 
-    expect(resolved.overridden).toEqual({ thinking: "max", model: undefined });
+    expect(resolved.overridden).toEqual({ thinking: "max" });
   });
 });

@@ -372,7 +372,7 @@ All fields are optional — sensible defaults for everything.
 | `isolated` | `false` | Hermetic specialist mode: forces `extensions: false` + `skills: false` + drops `ext:` selectors. Only built-in tools. Distinct from `isolation: worktree` (filesystem) |
 | `enabled` | `true` | Set to `false` to disable an agent (useful for hiding a default agent per-project) |
 
-Frontmatter is authoritative. If an agent file sets `model`, `thinking`, `inherit_context`, `run_in_background`, `isolated`, or `isolation`, those values are locked for that agent. `Agent` tool parameters only fill fields the agent config leaves unspecified. `max_turns` has no tool parameter at all: an agent's turn ceiling is its own `max_turns`, else the `defaultMaxTurns` setting, else unlimited. Other spawn paths differ per field:
+Frontmatter is authoritative for every field but `model`. If an agent file sets `thinking`, `inherit_context`, `run_in_background`, `isolated`, or `isolation`, those values are locked for that agent, and `Agent` tool parameters only fill fields the agent config leaves unspecified. `model` is the exception: an `Agent({ model: "..." })` parameter overrides the agent file's pin, and the pin applies only when the caller names no model. A caller model that matches none of the available models is refused with the list of available models; the `model` parameter's description also carries that list (the same set `/model` shows), so the orchestrator does not have to guess names. `max_turns` has no tool parameter at all: an agent's turn ceiling is its own `max_turns`, else the `defaultMaxTurns` setting, else unlimited. Other spawn paths differ per field:
 
 - `isolated` holds on every spawn path, including `@handle` mentions, workflows and [cross-extension RPC](https://github.com/tintinweb/pi-subagents/blob/master/docs/rpc.md).
 - `isolation` holds on every path except workflows: as in Claude Code, only the script's `agent()` option decides there.
@@ -700,7 +700,7 @@ When on, each subagent spawn's effective model is validated against pi's own `en
 | Pinned in agent frontmatter | Warning toast + the pinned model runs (frontmatter is authoritative) |
 | Parent-inherited (neither set) | Warning toast + parent's model runs |
 
-**Design:** `scopeModels` is a guardrail against the orchestrator picking unexpected models at runtime, not a hard policy against user-level config. The "frontmatter is authoritative" guarantee from v0.5.1 still holds for `model:` — caller params can't override frontmatter, and frontmatter pins run even when out of scope (with a visible warning).
+**Design:** `scopeModels` is a guardrail against the orchestrator picking unexpected models at runtime, not a hard policy against user-level config. Frontmatter pins run even when out of scope (with a visible warning); a caller-supplied model, which overrides the pin, gets the hard error.
 
 **Nested spawns** ([nested subagents](#nested-subagents)) apply the same table against the parent's config root. The hard-error case is identical; the warning cases proceed silently, since a subagent session has no UI to toast to.
 
@@ -762,7 +762,7 @@ Independent of `reportUsage`: this one is what you read, that one is what your s
 
 Off by default because the row already carries the description, turns, tool uses, tokens and elapsed time, and every character it gains is one the description loses on a narrow terminal. The other surfaces show the pair either way: the `Agent` tool result names the model beside its tags, and the conversation view's `↳` row spells out the canonical `provider/model-id`.
 
-Both places report what the run *actually* used, read back from the child session once pi has resolved its defaults and clamped the level to what the model supports — not what the call asked for. Where those differ, the request is kept beside the effective value rather than dropped, whether pi clamped it or an agent file's frontmatter outranked it:
+Both places report what the run *actually* used, read back from the child session once pi has resolved its defaults and clamped the level to what the model supports — not what the call asked for. Where those differ, the request is kept beside the effective value rather than dropped, whether pi clamped the level or an agent file's `thinking` outranked it:
 
 ```text
   ↳ anthropic/claude-haiku-4-5 · thinking: low (asked max) · background

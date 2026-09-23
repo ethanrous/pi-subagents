@@ -112,10 +112,11 @@ export function resolveAgentInvocationConfig(
    * one (#182). Populated only where both sides named something and they
    * disagree — a caller who asked for what they got was still honored.
    *
-   * `max_turns` has no entry here because a caller cannot ask for a turn cap:
-   * neither spawn schema declares the field, so there is no request to disclose.
+   * `model` is absent because the caller's model wins over the agent file's.
+   * `max_turns` is absent because a caller cannot ask for a turn cap: neither
+   * spawn schema declares the field, so there is no request to disclose.
    */
-  overridden?: { thinking?: ThinkingLevel; model?: string };
+  overridden?: { thinking?: ThinkingLevel };
 } {
   // Precedence first, collapse second — reversing these loses the veto, since
   // an agent file's "off" only outranks a caller's "worktree" while it is still
@@ -127,14 +128,11 @@ export function resolveAgentInvocationConfig(
     && agentConfig.thinking !== params.thinking
     ? params.thinking as ThinkingLevel
     : undefined;
-  const overriddenModel = agentConfig?.model != null && params.model != null
-    && agentConfig.model !== params.model
-    ? params.model
-    : undefined;
-
   return {
-    modelInput: agentConfig?.model ?? params.model,
-    modelFromParams: agentConfig?.model == null && params.model != null,
+    // Model is the one field where the caller outranks the agent file: the
+    // parameter is an override of the type's default, not a gap-filler.
+    modelInput: params.model ?? agentConfig?.model,
+    modelFromParams: params.model != null,
     thinking: (agentConfig?.thinking ?? params.thinking) as ThinkingLevel | undefined,
     maxTurns: agentConfig?.maxTurns,
     inheritContext: agentConfig?.inheritContext ?? params.inherit_context ?? false,
@@ -144,9 +142,7 @@ export function resolveAgentInvocationConfig(
     // Undefined rather than an empty object when nothing was overridden: callers
     // spread this into the invocation snapshot, and an always-present key would
     // put `requestedThinking: undefined` on every record.
-    overridden: overriddenThinking || overriddenModel
-      ? { thinking: overriddenThinking, model: overriddenModel }
-      : undefined,
+    overridden: overriddenThinking ? { thinking: overriddenThinking } : undefined,
   };
 }
 
