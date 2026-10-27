@@ -27,8 +27,6 @@ function makeAgentConfig(overrides: Partial<AgentConfig> = {}): AgentConfig {
     extensions: false,
     skills: false,
     systemPrompt: "budgeted",
-    promptMode: "replace",
-    inheritContext: false,
     runInBackground: false,
     isolated: false,
     ...overrides,

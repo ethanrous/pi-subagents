@@ -363,7 +363,6 @@ describe("createWorkflowHost — scopeModels", () => {
       skills: false,
       model: "anthropic/blocked-model",
       systemPrompt: "pinned",
-      promptMode: "replace",
     } as any]]));
   });
 

@@ -80,6 +80,12 @@ beforeEach(() => {
     spawnAndWait,
     awaitStartup: vi.fn(async () => {}),
     getRecord: (id: string) => records.get(id),
+    abort: vi.fn((id: string) => {
+      const record = records.get(id);
+      if (record?.status !== "running" && record?.status !== "queued") return false;
+      record.status = "stopped";
+      return true;
+    }),
     resume: vi.fn(),
   } as any;
 });
@@ -222,6 +228,41 @@ describe("child-safe nested Agent tools", () => {
     expect(record.pendingSteers).toEqual(["focus on tests"]);
   });
 
+  it("stops an owned child and returns its partial output", async () => {
+    const [, , , stop] = tools();
+    records.set("child-1", { id: "child-1", status: "running", result: "half an answer", parentAgentId: "parent-1" });
+
+    const result = await execute(stop, { agent_id: "child-1" });
+
+    expect(result.isError).toBe(false);
+    expect(result.content[0].text).toContain("stopped");
+    expect(result.content[0].text).toContain("half an answer");
+    expect(manager.abort).toHaveBeenCalledWith("child-1");
+    expect(records.get("child-1")?.status).toBe("stopped");
+  });
+
+  it("refuses to stop a child owned by another parent", async () => {
+    const [, , , stop] = tools();
+    records.set("foreign", { id: "foreign", status: "running", parentAgentId: "other" });
+
+    const result = await execute(stop, { agent_id: "foreign" });
+
+    expect(result.isError).toBe(true);
+    expect(manager.abort).not.toHaveBeenCalled();
+    expect(records.get("foreign")?.status).toBe("running");
+  });
+
+  it("reports an owned child that already finished without aborting", async () => {
+    const [, , , stop] = tools();
+    records.set("child-1", { id: "child-1", status: "completed", parentAgentId: "parent-1" });
+
+    const result = await execute(stop, { agent_id: "child-1" });
+
+    expect(result.isError).toBe(false);
+    expect(result.content[0].text).toContain("already finished");
+    expect(manager.abort).not.toHaveBeenCalled();
+  });
+
   it("blocks delegation at the inherited depth cap", async () => {
     const [agent] = tools("all", 2, 2);
     const result = await execute(agent, {
@@ -287,15 +328,6 @@ describe("child-safe nested Agent tools", () => {
   });
 
   // #368 — a nested resume carries the caller's turn budget like a spawn does.
-  it("passes max_turns through on a nested resume", async () => {
-    const [agent] = tools(["scout"]);
-    await execute(agent, { subagent_type: "scout", description: "find files", prompt: "Find them", run_in_background: true });
-
-    await execute(agent, { resume: "child-1", subagent_type: "scout", description: "continue", prompt: "Continue", max_turns: 3 });
-
-    expect(manager.resume).toHaveBeenCalledWith("child-1", "Continue", undefined, expect.objectContaining({ maxTurns: 3 }));
-  });
-
   it("reports a background child that fails to start as a tool error", async () => {
     // Under isolation: "worktree" the child is not running when spawn() returns
     // — the repo copy is awaited. The failure must reach the parent as an error

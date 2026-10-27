@@ -7,7 +7,7 @@ import {
   type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { abortable } from "./abortable.js";
+import { abortable, waitForSettle } from "./abortable.js";
 import {
   buildAgentRegistry,
   getAgentConfigIn,
@@ -47,14 +47,13 @@ let maxSubagentDepth = 2;
 export function getMaxSubagentDepth(): number { return maxSubagentDepth; }
 export function setMaxSubagentDepth(n: number): void { maxSubagentDepth = Math.max(0, Math.floor(n)); }
 
-const NESTED_TOOL_NAMES = ["Agent", "get_subagent_result", "steer_subagent"] as const;
+const NESTED_TOOL_NAMES = ["Agent", "get_subagent_result", "steer_subagent", "stop_subagent"] as const;
 
 interface NestedSpawnOptions {
   description: string;
   model?: Model<any>;
   maxTurns?: number;
   isolated?: boolean;
-  inheritContext?: boolean;
   thinkingLevel?: ThinkingLevel;
   isBackground?: boolean;
   isolation?: IsolationMode;
@@ -89,6 +88,8 @@ export interface NestedAgentManager {
     onSpawned?: (id: string) => void,
   ): Promise<{ id: string; record: AgentRecord }>;
   getRecord(id: string): AgentRecord | undefined;
+  /** Stops a running or queued agent; false when it is neither. */
+  abort(id: string): boolean;
   resume(id: string, prompt: string, signal?: AbortSignal, options?: { maxTurns?: number }): Promise<AgentRecord | undefined>;
 }
 
@@ -176,7 +177,6 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
       ),
       resume: Type.Optional(Type.String({ description: "Resume a nested agent owned by this parent." })),
       isolated: Type.Optional(Type.Boolean()),
-      inherit_context: Type.Optional(Type.Boolean()),
       ...isolationParam(isWorktreeIsolationEnabled()),
     }),
     execute: async (_toolCallId, params, signal, _onUpdate, ctx) => {
@@ -185,10 +185,10 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
         if (!ownsRecord(existing, context.parentAgentId)) {
           return textResult(`Nested agent not found or not owned by this parent: "${params.resume}".`, true);
         }
-        // Frontmatter authoritative, as on the spawn path; the manager falls
-        // back to the limit the child was spawned with, then the default.
+        // The agent file's limit; the manager falls back to the limit the child
+        // was spawned with, then the default.
         const resumed = await context.manager.resume(params.resume, params.prompt, signal, {
-          maxTurns: getAgentConfigIn(loadRegistry(), existing.type)?.maxTurns ?? params.max_turns,
+          maxTurns: getAgentConfigIn(loadRegistry(), existing.type)?.maxTurns,
         });
         return resumed
           ? textResult(formatRecord(resumed, "inline"), resumed.status === "error")
@@ -263,14 +263,12 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
         model,
         maxTurns: invocation.maxTurns,
         isolated: invocation.isolated,
-        inheritContext: invocation.inheritContext,
         thinkingLevel: invocation.thinking,
         isolation: invocation.isolation,
         invocation: {
           thinking: invocation.thinking,
           maxTurns: invocation.maxTurns,
           isolated: invocation.isolated,
-          inheritContext: invocation.inheritContext,
           runInBackground: invocation.runInBackground,
           isolation: invocation.isolation,
         },
@@ -329,8 +327,8 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
       // `ctx` is forwarded to the manager unmodified, never captured at tool-build
       // time: each AgentSession builds its own ExtensionRunner from that session's
       // cwd/sessionManager/modelRegistry, so this is the CHILD's context. Capturing
-      // one earlier would silently give a grandchild the wrong worktree base, the
-      // wrong conversation under inherit_context, and the wrong inherited model.
+      // one earlier would silently give a grandchild the wrong worktree base and the
+      // wrong inherited model.
       //
       // spawn() throws on strict worktree-isolation failure and cwd validation —
       // report it as a tool error, like the top-level Agent tool does, instead of
@@ -421,5 +419,26 @@ export function createNestedSubagentTools(context: NestedToolContext): ToolDefin
     },
   });
 
-  return [agentTool, resultTool, steerTool];
+  const stopTool = defineTool({
+    name: NESTED_TOOL_NAMES[3],
+    label: "Stop Nested Agent",
+    description: "Stop a running or queued nested agent owned by this parent. Its partial output is returned.",
+    parameters: Type.Object({
+      agent_id: Type.String(),
+    }),
+    execute: async (_toolCallId, params, signal) => {
+      const record = context.manager.getRecord(params.agent_id);
+      if (!ownsRecord(record, context.parentAgentId)) {
+        return textResult(`Nested agent not found or not owned by this parent: "${params.agent_id}".`, true);
+      }
+      if (record.status !== "running" && record.status !== "queued") {
+        return textResult(`Nested agent ${record.id} already finished (status: ${record.status}).`);
+      }
+      context.manager.abort(record.id);
+      if (record.promise) await waitForSettle(record.promise, signal);
+      return textResult(`Nested agent ${record.id} stopped.${partialOutputSuffix(record, "stop")}`);
+    },
+  });
+
+  return [agentTool, resultTool, steerTool, stopTool];
 }

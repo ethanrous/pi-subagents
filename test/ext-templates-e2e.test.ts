@@ -62,7 +62,7 @@ const SCENARIOS = readdirSync(TEMPLATES_DIR)
     };
   });
 
-/** Distinctive marker for the parent system prompt (prompt_mode: append asserts it leaks in). */
+/** Distinctive marker for the parent system prompt (asserted absent from the child's prompt). */
 const PARENT_PROMPT = "PARENT_PROMPT_MARKER";
 
 describe("ext: / tools: scoping — template-driven e2e (real pi-mono, headless)", () => {
@@ -110,13 +110,12 @@ describe("ext: / tools: scoping — template-driven e2e (real pi-mono, headless)
       unregisterProvider: () => {},
     };
     // cwd = fixtures dir so the templates' relative extensions: paths resolve.
-    // getSystemPrompt returns a distinctive marker so prompt_mode: append can be
-    // proven to inherit the parent prompt.
+    // getSystemPrompt returns a distinctive marker so the child's prompt can be
+    // proven not to contain the parent prompt.
     const ctx: any = { cwd: FIXTURES_DIR, getSystemPrompt: () => PARENT_PROMPT, isProjectTrusted: () => true, model, modelRegistry };
     const pi: any = { exec: async () => ({ code: 1, stdout: "", stderr: "" }) };
 
-    // Mirror production: the caller resolves frontmatter-locked fields (isolated,
-    // inherit_context, …) into runAgent options via resolveAgentInvocationConfig.
+    // Mirror production: the caller resolves frontmatter-locked fields (isolated, …) into runAgent options via resolveAgentInvocationConfig.
     // isolated is the one that affects tool gating (forces extensions:false + drops ext:).
     const resolved = resolveAgentInvocationConfig(getAgentConfig(agentName), { modelFromParams: false } as any);
 
@@ -128,10 +127,9 @@ describe("ext: / tools: scoping — template-driven e2e (real pi-mono, headless)
         model,
         cwd: FIXTURES_DIR,
         isolated: resolved.isolated,
-        inheritContext: resolved.inheritContext,
         onSessionCreated: (s) => {
           // Both fixed at construction (before any prompt turn): the gated tool
-          // set and the effective system prompt (built from prompt_mode + skills).
+          // set and the effective system prompt (built from pi's prompt + the agent's instructions + skills).
           active = s.getActiveToolNames();
           prompt = s.systemPrompt;
         },

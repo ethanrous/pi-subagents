@@ -160,15 +160,15 @@ describe("toolDescriptionMode", () => {
       "self-contained",
       "model",
       "thinking",
-      "inherit_context",
     ]) {
       expect(visible).toContain(contract);
     }
+    expect(visible).not.toContain("inherit_context");
   });
 
   it("every strategy param carries a real description of its own", () => {
     const props = setup().get("Agent").parameters?.properties ?? {};
-    for (const name of ["run_in_background", "model", "thinking", "inherit_context"]) {
+    for (const name of ["run_in_background", "model", "thinking"]) {
       // Long enough to be an explanation the model can act on, not a bare label.
       expect(props[name]?.description?.length ?? 0).toBeGreaterThan(40);
     }

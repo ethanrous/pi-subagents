@@ -58,7 +58,6 @@ interface AgentInvocationParams {
   model?: string;
   thinking?: string;
   run_in_background?: boolean;
-  inherit_context?: boolean;
   isolated?: boolean;
   /**
    * Untyped on purpose. Both tool schemas now build this field conditionally
@@ -102,7 +101,6 @@ export function resolveAgentInvocationConfig(
   thinking?: ThinkingLevel;
   /** The agent file's own `max_turns`. A caller has no way to set one. */
   maxTurns?: number;
-  inheritContext: boolean;
   runInBackground: boolean;
   isolated: boolean;
   isolation?: IsolationMode;
@@ -135,7 +133,6 @@ export function resolveAgentInvocationConfig(
     modelFromParams: params.model != null,
     thinking: (agentConfig?.thinking ?? params.thinking) as ThinkingLevel | undefined,
     maxTurns: agentConfig?.maxTurns,
-    inheritContext: agentConfig?.inheritContext ?? params.inherit_context ?? false,
     runInBackground: agentConfig?.runInBackground ?? params.run_in_background ?? opts?.defaultRunInBackground ?? false,
     isolated: agentConfig?.isolated ?? params.isolated ?? false,
     isolation,

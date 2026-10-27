@@ -13,11 +13,9 @@ vi.mock("../src/agent-runner.js", async () => {
   const actual = await vi.importActual<typeof import("../src/agent-runner.js")>("../src/agent-runner.js");
   return { ...actual, runAgent: vi.fn(), resumeAgent: vi.fn() };
 });
-vi.mock("../src/mention-clone.js", () => ({ runMentionClone: vi.fn() }));
 
 import { resumeAgent, runAgent } from "../src/agent-runner.js";
 import subagentsExtension from "../src/index.js";
-import { runMentionClone } from "../src/mention-clone.js";
 import { ctx, type Hermetic, hermeticDir, makePi } from "./helpers/boot-extension.js";
 
 let hermetic: Hermetic | undefined;
@@ -26,7 +24,6 @@ let booted: Map<string, any> | undefined;
 beforeEach(() => {
   vi.mocked(runAgent).mockReset();
   vi.mocked(resumeAgent).mockReset();
-  vi.mocked(runMentionClone).mockReset();
 });
 
 afterEach(async () => {
@@ -59,7 +56,7 @@ const send = (lifecycle: Map<string, any>, text: string) =>
   lifecycle.get("input")({ type: "input", text, source: "interactive" }, ctx());
 
 describe("an agent started by a mention", () => {
-  it("relays its answer through the ordinary completion notification (direct mode)", async () => {
+  it("relays its answer through the ordinary completion notification ", async () => {
     const { pi, lifecycle } = boot({ agentMentions: "direct" });
     vi.mocked(runAgent).mockResolvedValue({
       responseText: "found four planted bugs",
@@ -76,31 +73,6 @@ describe("an agent started by a mention", () => {
       expect.objectContaining({
         customType: "subagent-notification",
         content: expect.stringContaining("found four planted bugs"),
-      }),
-      expect.objectContaining({ triggerTurn: true }),
-    );
-  });
-
-  it("relays it when the clone fell back to a direct start (model mode)", async () => {
-    // What the user hits today: the clone reports it could not start the agent,
-    // index.ts starts it directly, and the answer still has to come back.
-    const { pi, lifecycle } = boot();
-    vi.mocked(runMentionClone).mockResolvedValue({ spawned: false, error: "the conversation clone did not start it" });
-    vi.mocked(runAgent).mockResolvedValue({
-      responseText: "cyan, obviously",
-      session: fakeSession(),
-      aborted: false,
-      steered: false,
-      failure: undefined,
-    } as any);
-
-    await send(lifecycle, "@Explore whats your favorite color");
-    await new Promise(r => setTimeout(r, 500));
-
-    expect(pi.sendMessage).toHaveBeenCalledWith(
-      expect.objectContaining({
-        customType: "subagent-notification",
-        content: expect.stringContaining("cyan, obviously"),
       }),
       expect.objectContaining({ triggerTurn: true }),
     );

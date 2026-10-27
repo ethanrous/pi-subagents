@@ -123,15 +123,16 @@ describe.skipIf(LIVE)("subagents print-mode e2e (scripted faux, real pi-mono)", 
     // The child takes a beat to "think" (a real delay in its faux turn). That
     // delay is what makes the contrast causal and deterministic:
     //   - WITHOUT the hold, the parent's turn ends and the runner tears down
-    //     before the child ever streams → the child is abandoned (2 model calls:
-    //     parent's tool-call turn + its summary turn; the child never runs).
+    //     while the child is still thinking → its turn has not finished.
     //   - WITH the hold, the parent loop blocks in waitForAll() until the child
-    //     finishes → the child's own model turn actually runs (≥3 calls).
+    //     finishes → the child's own model turn completes (≥3 calls).
     const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+    let childTurnsFinished = 0;
     const respond = async (ctx: Context) => {
       const isParent = getCurrentTools(ctx.messages).some((t) => t.name === "Agent");
       if (!isParent) {
         await sleep(80); // child takes long enough that a non-held parent exits first
+        childTurnsFinished++;
         return "CHILD_BG_RAN";
       }
       const spawned = ctx.messages.some(
@@ -146,18 +147,20 @@ describe.skipIf(LIVE)("subagents print-mode e2e (scripted faux, real pi-mono)", 
     // `modelCalls` is snapshotted at that moment (it's a plain number on the
     // result), so draining afterwards to tear down cleanly doesn't change it.
     const noHold = await runPrintMode({ prompt: "go", hold: false, respond });
-    const abandonedCalls = noHold.modelCalls;
+    const abandonedChildTurns = childTurnsFinished;
     await noHold.manager?.waitForAll(); // let the orphan finish before dispose (avoids stale-ctx)
     await noHold.dispose();
 
     // Subject: hold on → child runs to completion before the parent finishes.
+    const finishedBefore = childTurnsFinished;
     run = await runPrintMode({ prompt: "go", hold: true, respond });
+    const heldChildTurns = childTurnsFinished - finishedBefore;
 
     // Background spawn returns its envelope synchronously either way.
     expect(agentToolResults(run.parentSession)[0]).toMatch(/background/i);
     // The hold is load-bearing: only with it does the child's turn actually run.
-    expect(abandonedCalls).toBe(2); // parent tool-call + summary; child never streamed
-    expect(run.modelCalls).toBeGreaterThan(abandonedCalls);
+    expect(abandonedChildTurns).toBe(0);
+    expect(heldChildTurns).toBe(1);
     expect(run.modelCalls).toBeGreaterThanOrEqual(3);
   });
 

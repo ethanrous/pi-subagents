@@ -206,7 +206,6 @@ interface SpawnOptions {
   model?: Model<any>;
   maxTurns?: number;
   isolated?: boolean;
-  inheritContext?: boolean;
   thinkingLevel?: ThinkingLevel;
   isBackground?: boolean;
   /**
@@ -828,7 +827,6 @@ export class AgentManager {
       model: options.model,
       maxTurns: options.maxTurns,
       isolated: options.isolated,
-      inheritContext: options.inheritContext,
       thinkingLevel: options.thinkingLevel,
       structuredOutput: options.structuredOutput,
       resumeSessionFile: options.resumeSessionFile,

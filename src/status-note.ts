@@ -80,11 +80,11 @@ export function getForegroundOutcomeNote(status: string): string {
 }
 
 /**
- * Salvaged partial output of a failed run, as a labeled suffix for the error
+ * Salvaged partial output of a failed or stopped run, as a labeled suffix for the error
  * surfaces (or "" if the run produced nothing). `record.result` is bounded to
  * the run's own turns, so this is never a stale earlier answer (#144).
  */
-export function partialOutputSuffix(record: Pick<AgentRecord, "result">): string {
+export function partialOutputSuffix(record: Pick<AgentRecord, "result">, cause: "failure" | "stop" = "failure"): string {
   const partial = record.result?.trim();
-  return partial ? `\n\nPartial output before the failure:\n${partial}` : "";
+  return partial ? `\n\nPartial output before the ${cause}:\n${partial}` : "";
 }

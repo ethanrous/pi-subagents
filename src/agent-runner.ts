@@ -23,12 +23,10 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { BUILTIN_TOOL_NAMES, getAgentConfig, getConfig, getMemoryToolNames, getReadOnlyMemoryToolNames, getToolNamesForType } from "./agent-types.js";
 import { runInChildSessionContext } from "./child-context.js";
-import { buildParentContext, extractText } from "./context.js";
 import { DEFAULT_AGENTS } from "./default-agents.js";
-import { detectEnv } from "./env.js";
 import { buildMemoryBlock, buildReadOnlyMemoryBlock } from "./memory.js";
 import { createNestedSubagentTools, getMaxSubagentDepth, type NestedAgentManager } from "./nested-tools.js";
-import { buildAgentPrompt, inheritableParentPrompt, type PromptExtras } from "./prompts.js";
+import { buildAgentPrompt, type PromptExtras } from "./prompts.js";
 import { preloadSkills } from "./skill-loader.js";
 import { createStructuredCapture, createStructuredOutputTool, structuredRetryPrompt } from "./structured-output.js";
 import type { SubagentType, ThinkingLevel } from "./types.js";
@@ -46,6 +44,7 @@ export const SUBAGENT_TOOL_NAMES = {
   WORKFLOW: "SubagentWorkflow",
   GET_RESULT: "get_subagent_result",
   STEER: "steer_subagent",
+  STOP: "stop_subagent",
 } as const;
 
 /** Names of tools registered by this extension that subagents must NOT inherit. */
@@ -488,6 +487,13 @@ export interface ToolActivity {
   toolName: string;
 }
 
+function extractText(content: unknown[]): string {
+  return content
+    .filter((c: any) => c.type === "text")
+    .map((c: any) => c.text ?? "")
+    .join("\n");
+}
+
 export interface RunOptions {
   /** ExtensionAPI instance — used for pi.exec() instead of execSync. */
   pi: ExtensionAPI;
@@ -498,7 +504,6 @@ export interface RunOptions {
   signal?: AbortSignal;
   /** Applies only when the agent file leaves `isolated:` unset — frontmatter is authoritative. */
   isolated?: boolean;
-  inheritContext?: boolean;
   thinkingLevel?: ThinkingLevel;
   /**
    * Reopen this pi session file rather than starting an empty conversation.
@@ -803,12 +808,6 @@ export async function runAgent(
   // They differ only for SpawnOptions.cwd spawns (config stays with the parent).
   const configCwd = options.configCwd ?? effectiveCwd;
 
-  const env = await detectEnv(options.pi, effectiveCwd);
-
-  // Get parent system prompt for append-mode agents, without the sections the
-  // child session renders itself (skills, cwd, extension sections).
-  const parentSystemPrompt = inheritableParentPrompt(ctx.getSystemPrompt(), ctx.cwd);
-
   // Build prompt extras (memory, skill preloading)
   const extras: PromptExtras = {};
   if (options.worktreeBase) extras.worktreeBase = options.worktreeBase;
@@ -855,17 +854,11 @@ export async function runAgent(
     }
   }
 
-  // Build system prompt from agent config
-  let systemPrompt: string;
-  if (agentConfig) {
-    systemPrompt = buildAgentPrompt(agentConfig, effectiveCwd, env, parentSystemPrompt, extras);
-  } else {
-    // Unknown type fallback: spread the canonical general-purpose config (defensive —
-    // unreachable in practice since index.ts resolves unknown types before calling runAgent).
-    const fallback = DEFAULT_AGENTS.get("general-purpose");
-    if (!fallback) throw new Error(`No fallback config available for unknown type "${type}"`);
-    systemPrompt = buildAgentPrompt({ ...fallback, name: type }, effectiveCwd, env, parentSystemPrompt, extras);
-  }
+  // Subagent-specific text appended after pi's own system prompt.
+  // Unknown type fallback is defensive: index.ts resolves unknown types before calling runAgent.
+  const fallback = DEFAULT_AGENTS.get("general-purpose");
+  if (!agentConfig && !fallback) throw new Error(`No fallback config available for unknown type "${type}"`);
+  const appendedPrompt = buildAgentPrompt(agentConfig ?? { ...fallback!, name: type }, extras);
 
   // When skills is string[], we've already preloaded them into the prompt.
   // Still pass noSkills: true since we don't need the skill loader to load them again.
@@ -881,11 +874,6 @@ export async function runAgent(
   //   "*" keeps all default-discovered extensions. Excluded extensions never
   //   bind handlers or register tools (their factory still runs once).
   //
-  // Suppress AGENTS.md/CLAUDE.md and APPEND_SYSTEM.md — upstream's
-  // buildSystemPrompt() re-appends both AFTER systemPromptOverride, which
-  // would defeat prompt_mode: replace and isolated: true. Parent context, if
-  // wanted, reaches the subagent via prompt_mode: append (parentSystemPrompt
-  // is embedded in systemPromptOverride) or inherit_context (conversation).
   // `ext:` selectors from the `tools:` CSV narrow which extension tools surface to
   // the LLM. They do NOT control loading — `extensions:` is the sole authority for
   // which extensions load. `ext:foo` against an extension that `extensions:` excluded
@@ -978,9 +966,7 @@ export async function runAgent(
     noSkills,
     noPromptTemplates: true,
     noThemes: true,
-    noContextFiles: true,
-    systemPromptOverride: () => systemPrompt,
-    appendSystemPromptOverride: () => [],
+    appendSystemPromptOverride: (base) => [...base, appendedPrompt],
   });
   await runInChildSessionContext(() => loader.reload());
 
@@ -1068,7 +1054,6 @@ export async function runAgent(
   // Resolve thinking level: explicit option > agent config > parent session level.
   // Without the parent step, an unset level falls through to pi's
   // defaultThinkingLevel (e.g. "max") instead of matching the spawning session.
-  // Same idiom as mention-clone.ts.
   const thinkingLevel = options.thinkingLevel ?? agentConfig?.thinking ?? ctx.thinkingLevel;
 
   const disallowedSet = agentConfig?.disallowedTools
@@ -1320,17 +1305,6 @@ export async function runAgent(
   const collector = collectResponseText(session);
   const cleanupAbort = forwardAbortSignal(session, options.signal);
 
-  // Build the effective prompt: optionally prepend parent context. Only for a
-  // fresh conversation — a reopened one already holds its history, and a live
-  // resume never re-sends the parent's either.
-  let effectivePrompt = prompt;
-  if (options.inheritContext && !options.resumeSessionFile) {
-    const parentContext = buildParentContext(ctx);
-    if (parentContext) {
-      effectivePrompt = parentContext + prompt;
-    }
-  }
-
   // Boundary for the history fallback: only assistant text produced from here
   // on counts as this run's output (a fresh session, so usually 0).
   const startLen = session.messages.length;
@@ -1339,7 +1313,7 @@ export async function runAgent(
     // A signal that fired before this point never calls the listener above, and
     // pi's `session.abort()` is a no-op until a run is active — so a child whose
     // parent is already gone is not prompted at all.
-    if (options.signal?.aborted !== true) await session.prompt(effectivePrompt);
+    if (options.signal?.aborted !== true) await session.prompt(prompt);
 
     // One more prompt when a schema was asked for and nothing usable came back
     // — the model answered in prose, or only ever called the tool invalidly.

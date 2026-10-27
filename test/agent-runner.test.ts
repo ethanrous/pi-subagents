@@ -94,7 +94,6 @@ vi.mock("../src/agent-types.js", () => ({
     builtinToolNames: ["read"],
     extensions: false,
     skills: false,
-    promptMode: "replace",
   })),
   getAgentConfig: vi.fn(() => ({
     name: "Explore",
@@ -103,8 +102,6 @@ vi.mock("../src/agent-types.js", () => ({
     extensions: false,
     skills: false,
     systemPrompt: "You are Explore.",
-    promptMode: "replace",
-    inheritContext: false,
     runInBackground: false,
     isolated: false,
   })),
@@ -113,13 +110,8 @@ vi.mock("../src/agent-types.js", () => ({
   getToolNamesForType: vi.fn(() => ["read"]),
 }));
 
-vi.mock("../src/env.js", () => ({
-  detectEnv: vi.fn(async () => ({ isGitRepo: false, branch: "", platform: "linux" })),
-}));
-
 vi.mock("../src/prompts.js", () => ({
   buildAgentPrompt: vi.fn(() => "system prompt"),
-  inheritableParentPrompt: vi.fn((rendered: string) => rendered),
 }));
 
 vi.mock("../src/memory.js", () => ({
@@ -191,7 +183,14 @@ function createSession(finalText: string) {
     // extension registering after bind by mutating `loaderExtensionsRef`.
     getAllTools: vi.fn(() => {
       const opts = createAgentSession.mock.calls[0]?.[0];
-      return opts ? mockRegistry(opts).map((name) => ({ name })) : [];
+      const exposureOf = (name: string): string | undefined => {
+        for (const e of loaderExtensionsRef.current.extensions) {
+          const tool = e.tools.get(name) as { exposure?: string } | undefined;
+          if (tool) return tool.exposure;
+        }
+        return undefined;
+      };
+      return opts ? mockRegistry(opts).map((name) => ({ name, exposure: exposureOf(name) })) : [];
     }),
     getToolDefinition: vi.fn((_name: string): Record<string, unknown> | undefined => undefined),
     // pi's Agent; `beforeToolCall` is an optional, assignable hook the scope
@@ -347,10 +346,10 @@ describe("agent-runner final output capture", () => {
     createAgentSession.mockResolvedValue({ session });
 
     await runAgent(ctx, "Explore", "Say ISOLATED", { pi, cwd: "/wt/copy", worktreeBase: "/repo" });
-    expect(vi.mocked(buildAgentPrompt).mock.lastCall![4]).toMatchObject({ worktreeBase: "/repo" });
+    expect(vi.mocked(buildAgentPrompt).mock.lastCall![1]).toMatchObject({ worktreeBase: "/repo" });
 
     await runAgent(ctx, "Explore", "Say ISOLATED", { pi });
-    expect(vi.mocked(buildAgentPrompt).mock.lastCall![4]).not.toHaveProperty("worktreeBase");
+    expect(vi.mocked(buildAgentPrompt).mock.lastCall![1]).not.toHaveProperty("worktreeBase");
   });
 
   it("marks a workflow child so its prompt says the final text is the return value", async () => {
@@ -359,10 +358,10 @@ describe("agent-runner final output capture", () => {
     createAgentSession.mockResolvedValue({ session });
 
     await runAgent(ctx, "Explore", "List the files", { pi, workflow: true });
-    expect(vi.mocked(buildAgentPrompt).mock.lastCall![4]).toMatchObject({ workflowChild: true });
+    expect(vi.mocked(buildAgentPrompt).mock.lastCall![1]).toMatchObject({ workflowChild: true });
 
     await runAgent(ctx, "Explore", "List the files", { pi });
-    expect(vi.mocked(buildAgentPrompt).mock.lastCall![4]).not.toHaveProperty("workflowChild");
+    expect(vi.mocked(buildAgentPrompt).mock.lastCall![1]).not.toHaveProperty("workflowChild");
   });
 
   it("leaves the block off a schema-bearing child, which answers through StructuredOutput", async () => {
@@ -375,7 +374,7 @@ describe("agent-runner final output capture", () => {
       workflow: true,
       structuredOutput: { schema: { type: "object" }, check: () => true },
     });
-    expect(vi.mocked(buildAgentPrompt).mock.lastCall![4]).not.toHaveProperty("workflowChild");
+    expect(vi.mocked(buildAgentPrompt).mock.lastCall![1]).not.toHaveProperty("workflowChild");
   });
 
   it("passes the parent model runtime while retaining the legacy model registry", async () => {
@@ -404,23 +403,32 @@ describe("agent-runner final output capture", () => {
     expect(createAgentSession.mock.calls[0][0]).not.toHaveProperty("modelRuntime");
   });
 
-  it("suppresses AGENTS.md/CLAUDE.md/APPEND_SYSTEM.md for subagents", async () => {
-    const { session } = createSession("ISOLATED");
+  it("keeps pi's own system prompt and appends the subagent text after it", async () => {
+    const { session } = createSession("OK");
     createAgentSession.mockResolvedValue({ session });
 
-    await runAgent(ctx, "Explore", "Say ISOLATED", { pi });
+    await runAgent(ctx, "Explore", "go", { pi });
 
-    // noContextFiles skips AGENTS.md/CLAUDE.md at the loader source;
-    // appendSystemPromptOverride suppresses APPEND_SYSTEM.md (no flag equivalent).
-    expect(defaultResourceLoaderCtor).toHaveBeenCalledWith(
-      expect.objectContaining({
-        noContextFiles: true,
-        appendSystemPromptOverride: expect.any(Function),
-      }),
-    );
-    // The override returns an empty list so any loaded sources are discarded.
     const ctorArgs = defaultResourceLoaderCtor.mock.calls[0][0];
-    expect(ctorArgs.appendSystemPromptOverride(["would-be-loaded"])).toEqual([]);
+    // Context files load and pi builds the base prompt itself.
+    expect(ctorArgs).not.toHaveProperty("noContextFiles");
+    expect(ctorArgs).not.toHaveProperty("systemPromptOverride");
+    // APPEND_SYSTEM.md sources stay; the subagent text follows them.
+    expect(ctorArgs.appendSystemPromptOverride(["APPEND_SYSTEM.md content"])).toEqual([
+      "APPEND_SYSTEM.md content",
+      "system prompt",
+    ]);
+  });
+
+  it("never embeds the parent system prompt", async () => {
+    const { buildAgentPrompt } = await import("../src/prompts.js");
+    const { session } = createSession("OK");
+    createAgentSession.mockResolvedValue({ session });
+
+    await runAgent(ctx, "Explore", "go", { pi });
+
+    expect(ctx.getSystemPrompt).not.toHaveBeenCalled();
+    expect(vi.mocked(buildAgentPrompt).mock.lastCall).toHaveLength(2);
   });
 
   it("resumeAgent also falls back to the final assistant message text", async () => {
@@ -844,8 +852,6 @@ function makeAgentConfig(overrides: Record<string, unknown> = {}) {
     extensions: true as boolean | string[],
     skills: false as boolean | string[],
     systemPrompt: "Test.",
-    promptMode: "replace" as const,
-    inheritContext: false,
     runInBackground: false,
     ...overrides,
   };
@@ -858,7 +864,6 @@ function makeConfig(overrides: Record<string, unknown> = {}) {
     builtinToolNames: BUILTINS_7,
     extensions: true as boolean | string[],
     skills: false as boolean | string[],
-    promptMode: "replace" as const,
     ...overrides,
   };
 }
@@ -1064,31 +1069,6 @@ describe("agent-runner session persistence", () => {
     expect(createAgentSession).toHaveBeenCalledWith(expect.objectContaining({
       sessionManager: { kind: "forked-session-manager" },
     }));
-  });
-
-  it("does not prepend the parent's conversation to a reopened one", async () => {
-    // A reopened session already holds its own history; `inherit_context` is a
-    // property of the agent type and must only seed a fresh conversation, or a
-    // cold resume would paste the parent's whole transcript into this turn.
-    const parentCtx = {
-      ...ctx,
-      sessionManager: {
-        ...ctx.sessionManager,
-        getBranch: vi.fn(() => [{ type: "message", message: { role: "user", content: "PARENT-TURN" } }]),
-      },
-    };
-    vi.mocked(getAgentConfig).mockReturnValueOnce(makeAgentConfig());
-    const fresh = createSession("OK").session;
-    createAgentSession.mockResolvedValueOnce({ session: fresh });
-    await runAgent(parentCtx, "Explore", "go", { pi, inheritContext: true });
-    expect(String(fresh.prompt.mock.calls[0][0])).toContain("PARENT-TURN");
-
-    vi.mocked(getAgentConfig).mockReturnValueOnce(makeAgentConfig());
-    const reopened = createSession("OK").session;
-    createAgentSession.mockResolvedValueOnce({ session: reopened });
-    await runAgent(parentCtx, "Explore", "carry on", { pi, inheritContext: true, resumeSessionFile: "/sessions/explore.jsonl" });
-
-    expect(reopened.prompt).toHaveBeenCalledWith("carry on");
   });
 
   it("reopens in place a child whose header names no parent", async () => {
@@ -1699,10 +1679,10 @@ describe("agent-runner master tool allowlist", () => {
 // into the live `extension.tools` map, which is what these tests simulate.
 describe("agent-runner async extension tool registration", () => {
   /** Simulate `pi.registerTool` on an already-loaded extension. */
-  function registerLate(extPath: string, toolName: string) {
+  function registerLate(extPath: string, toolName: string, exposure?: string) {
     const ext = loaderExtensionsRef.current.extensions.find((e) => e.path === extPath);
     if (!ext) throw new Error(`no loaded extension at ${extPath}`);
-    ext.tools.set(toolName, {});
+    ext.tools.set(toolName, { exposure });
   }
 
   function setup(o: { builtinToolNames?: string[]; extSelectors?: string[] } = {}) {
@@ -1767,6 +1747,30 @@ describe("agent-runner async extension tool registration", () => {
     for (const l of listeners) l({ type: "turn_end" });
 
     expect(session.getActiveToolNames()).toContain("mcp__srv__lookup");
+  });
+
+  it("does not activate deferred, codemode or hidden extension tools", async () => {
+    setup();
+    withExtensions({ "/ext/browser.ts": [] });
+    const { session, listeners } = createSession("OK");
+    createAgentSession.mockResolvedValue({ session });
+    session.bindExtensions.mockImplementation(async () => {
+      registerLate("/ext/browser.ts", "browser_click", "deferred");
+      registerLate("/ext/browser.ts", "browser_script", "codemode");
+      registerLate("/ext/browser.ts", "browser_internal", "hidden");
+      registerLate("/ext/browser.ts", "browser_open", "direct");
+      registerLate("/ext/browser.ts", "browser_note", "model-only");
+      registerLate("/ext/browser.ts", "browser_plain");
+    });
+
+    await runAgent(ctx, "Explore", "go", { pi });
+    for (const l of listeners) l({ type: "turn_end" });
+
+    const active = session.getActiveToolNames();
+    expect(active).toEqual(expect.arrayContaining(["browser_open", "browser_note", "browser_plain"]));
+    expect(active).not.toContain("browser_click");
+    expect(active).not.toContain("browser_script");
+    expect(active).not.toContain("browser_internal");
   });
 
   it("ext: admits a late tool from the selected extension but not from others", async () => {

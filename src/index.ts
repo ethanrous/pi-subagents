@@ -5,6 +5,7 @@
  *   Agent             — LLM-callable: spawn a sub-agent
  *   get_subagent_result  — LLM-callable: check background agent status/result
  *   steer_subagent       — LLM-callable: send a steering message to a running agent
+ *   stop_subagent        - LLM-callable: stop a running or queued agent
  *
  * Commands:
  *   /agents                 — Interactive agent management menu
@@ -15,7 +16,7 @@ import { isAbsolute, join } from "node:path";
 import { type AgentSession, defineTool, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext, getAgentDir, getSettingsListTheme } from "@earendil-works/pi-coding-agent";
 import { Container, isKeyRelease, Key, matchesKey, type SettingItem, SettingsList, Spacer, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
-import { abortable } from "./abortable.js";
+import { abortable, waitForSettle } from "./abortable.js";
 import { hasAgentBadge, renderAgentName } from "./agent-color.js";
 import { buildNewAgentFile, disableInContent, enableInContent, isEmptyStub, locateAgentFile, personalAgentsDir, projectAgentsDir, serializeAgentFile } from "./agent-file-toggle.js";
 import { AgentManager, isTopLevelAgent } from "./agent-manager.js";
@@ -30,7 +31,6 @@ import { loadCustomAgents } from "./custom-agents.js";
 import { GroupJoinManager } from "./group-join.js";
 import { isolationParam, resolveAgentInvocationConfig, resolveJoinMode } from "./invocation-config.js";
 import { describeMention, handleBase, isReservedHandle, parseMention, resolveHandleToType, stripAgentPrefix } from "./mention.js";
-import { runMentionClone } from "./mention-clone.js";
 import { describeAvailableModels, describeModel, type ModelRegistry, resolveModel } from "./model-resolver.js";
 import { checkModelScope, isScopeModelsEnabled, setScopeModelsEnabled } from "./model-scope.js";
 import { getMaxSubagentDepth, setMaxSubagentDepth } from "./nested-tools.js";
@@ -56,7 +56,6 @@ import {
   formatTokens,
   formatTurns,
   getDisplayName,
-  getPromptModeLabel,
   SPINNER,
   type Theme,
   type UICtx,
@@ -900,17 +899,15 @@ export default function (pi: ExtensionAPI) {
     runWorkflowFlag(ctx);
   });
 
-  // Start a mentioned agent the direct way. runAgent resolves model, thinking,
-  // max turns and `isolated` from the agent's own config when the spawn omits
-  // them, but not `inherit_context`: an RPC caller decides that one itself. A
-  // mention is the user starting the agent from this session, so the file does —
-  // reloaded first, as the spawn reloads it, so a mid-session edit is not missed.
+  // Start a mentioned agent from the typed text. runAgent resolves model,
+  // thinking, max turns and `isolated` from the agent's own config when the
+  // spawn omits them. The agent file is reloaded first, so a mid-session edit
+  // is not missed.
   const startMentioned = (ctx: ExtensionContext, type: string, message: string) => {
     reloadCustomAgents();
     return spawnTopLevel(pi, ctx, type, message, {
       description: describeMention(message),
       isBackground: true,
-      inheritContext: getAgentConfig(type)?.inheritContext,
     });
   };
 
@@ -990,12 +987,8 @@ export default function (pi: ExtensionAPI) {
     // different path). The agent would detach, `ctx.ui.notify` is a no-op
     // outside the TUI, and print mode would exit having printed nothing.
     //
-    // `model` mode has none of that problem: it queues a reminder and lets the
-    // turn run, so the answer is the model's own, printed as usual. It is the
-    // only branch allowed to act headlessly; everything else falls through to
-    // the main model exactly as it did before mentions existed.
-    const canDispatchDirectly = ctx.mode === "tui";
-    if (!canDispatchDirectly && getAgentMentionMode() !== "model") return { action: "continue" };
+    // Headless input falls through to the main model.
+    if (ctx.mode !== "tui") return { action: "continue" };
 
     const mention = parseMention(event.text);
     if (!mention) return { action: "continue" };
@@ -1013,12 +1006,6 @@ export default function (pi: ExtensionAPI) {
     const alias = stripAgentPrefix(mention.handle);
     const resolved = manager.resolveMention(mention.handle)
       ?? (alias ? manager.resolveMention(alias) : undefined);
-
-    // Steering and resuming are direct in every mode, so headless they are not
-    // available at all. Falling through here rather than dropping to the start
-    // path below matters: the handle names an agent that already exists, and
-    // asking the model to start another one is not what was typed.
-    if (resolved && !canDispatchDirectly) return { action: "continue" };
 
     if (resolved?.kind === "live") {
       const record = resolved.record;
@@ -1110,51 +1097,6 @@ export default function (pi: ExtensionAPI) {
     const type = resolveHandleToType(typeHandle, getAvailableTypes())
       ?? (alias ? resolveHandleToType(alias, getAvailableTypes()) : undefined);
     if (!type) return { action: "continue" };
-
-    // Claude Code never starts the agent itself: `@agent-<type>` becomes an
-    // attachment asking the main model to do it, and the model writes the
-    // agent's prompt from the conversation rather than forwarding the typed
-    // text. That buys a real `Agent` tool call — transcript, per-tool widget
-    // detail, tool-use-id correlation, join grouping — and a prompt with the
-    // context a cold spawn lacks.
-    //
-    // It also costs a visible turn, spent narrating a decision the user already
-    // made by typing the handle. So the turn is taken by a clone of this
-    // conversation instead (mention-clone.ts): same messages, same system
-    // prompt, off-screen, holding only the `Agent` tool. Nothing reaches the
-    // chat, and what it starts is an ordinary top-level agent.
-    if (getAgentMentionMode() === "model") {
-      const label = `@${handleBase(type)}`;
-      // "Prompting", not "Starting": in this mode nothing starts until the
-      // off-screen clone has taken a whole model turn writing the agent's
-      // prompt, and that wait is the one thing the chat cannot show. `direct`
-      // says "Started" because by then it has. The distinction tells the user
-      // which of the two they are waiting on.
-      ctx.ui.notify(`Prompting ${label}…`, "info");
-      // Not awaited: the clone runs a full model turn, and prompt() is blocked
-      // until this hook returns. The user gets their prompt back immediately
-      // and the agent appears in the widget when it starts.
-      void runMentionClone({ ctx, type, message: mention.message, agentTool: registeredAgentTool })
-        .then(async (result) => {
-          if (result.spawned) return;
-          // A clone that could not run must not swallow the mention: start the
-          // agent the direct way rather than leaving the user with a toast and
-          // nothing running.
-          try {
-            const id = startMentioned(ctx, type, mention.message);
-            // Same reason as the direct path below: the agent may still be
-            // starting, and a failure there must reach this catch.
-            await manager.awaitStartup(id);
-            ctx.ui.notify(`Started ${label} directly — ${result.error}`, "warning");
-          } catch (err) {
-            ctx.ui.notify(
-              `Could not start ${label}: ${err instanceof Error ? err.message : String(err)}`,
-              "error",
-            );
-          }
-        });
-      return { action: "handled" };
-    }
 
     try {
       // The manager's onStart/onComplete callbacks own the widget, the fleet list
@@ -1314,12 +1256,9 @@ export default function (pi: ExtensionAPI) {
   // `input` hook and the stacked autocomplete provider, so the toggle applies
   // immediately — the provider itself can never be unregistered (pi's wrapper
   // list is append-only), it just delegates everything when this is off.
-  let agentMentionMode: AgentMentionMode = "model";
+  let agentMentionMode: AgentMentionMode = "direct";
   function getAgentMentionMode(): AgentMentionMode { return agentMentionMode; }
   function setAgentMentionMode(mode: AgentMentionMode): void { agentMentionMode = mode; }
-  // `model` and `direct` differ only in who starts a not-yet-running agent, so
-  // everything that just asks "are mentions live at all" — the suggestion list,
-  // the steer and resume branches — reads this instead of the mode.
   function isAgentMentionsEnabled(): boolean { return agentMentionMode !== "off"; }
 
   // Project/global default for writing the subagent .output transcript lives in
@@ -1434,8 +1373,8 @@ export default function (pi: ExtensionAPI) {
    * the agent file's `max_turns`, else the call's, else the limit the agent
    * was spawned with, else the default (#368).
    */
-  function resumeTurnLimit(record: AgentRecord, explicit?: number): number | undefined {
-    return normalizeMaxTurns(getAgentConfig(record.type)?.maxTurns ?? explicit ?? record.invocation?.maxTurns ?? getDefaultMaxTurns());
+  function resumeTurnLimit(record: AgentRecord): number | undefined {
+    return normalizeMaxTurns(getAgentConfig(record.type)?.maxTurns ?? record.invocation?.maxTurns ?? getDefaultMaxTurns());
   }
 
   /**
@@ -1628,7 +1567,7 @@ export default function (pi: ExtensionAPI) {
         description:
           'Opt-in only — fire later instead of now. Omit to run immediately (the default, almost always correct). ' +
           'Formats: 6-field cron ("0 0 9 * * 1" = 9am Mon), interval ("5m"/"1h"), one-shot ("+10m" or ISO). ' +
-          'Forces run_in_background; incompatible with inherit_context and resume. Returns job ID.',
+          'Forces run_in_background; incompatible with resume. Returns job ID.',
       }),
     ),
   };
@@ -1667,7 +1606,7 @@ Notes:
 - Parallel work: one message, multiple Agent calls — they run concurrently.
 - Subagents run in the background by default; you'll be notified when one completes. Pass run_in_background: false only when your very next action depends on the result and nothing else could usefully happen while it runs. Never fabricate or predict a pending agent's results — if the user asks before the notification arrives, say it's still running.
 - The result is not shown to the user — summarize it for them. Verify an agent's claimed code changes before reporting work done.
-- resume continues a previous agent by ID; steer_subagent messages a running one.${isolationCompactGuideline}`;
+- resume continues a previous agent by ID; steer_subagent messages a running one; stop_subagent stops one.${isolationCompactGuideline}`;
 
   const fullAgentToolDescription = `Launch a new agent to handle complex, multi-step tasks autonomously. Each agent type has specific capabilities and tools available to it.
 
@@ -1693,11 +1632,11 @@ If the target is already known, use a direct tool — \`read\` for a known path,
 - **Don't race**: after launching a background agent, you know nothing about its results. Never fabricate or predict them in any format — not as prose, summary, or structured output. The completion notification arrives in a later turn; it is never something you write yourself. If the user asks before it lands, say the agent is still running — give status, not a guess.
 - Use resume with an agent ID to continue a previous agent's work. A new (non-resume) Agent call starts a fresh agent with no memory of prior runs, so the prompt must be self-contained.
 - Use steer_subagent to send mid-run messages to a running background agent.
+- Use stop_subagent to stop a running or queued agent. Do not ask an agent to stop with steer_subagent.
 - Clearly tell the agent whether you expect it to write code or just to do research (search, file reads, etc.), since it is not aware of the user's intent.
 - If an agent's description says it should be used proactively, try to use it without the user having to ask for it first.
 - Use model to specify a different model (as "provider/modelId", or fuzzy e.g. "haiku", "sonnet").
-- Use thinking to control extended thinking level.
-- Use inherit_context if the agent needs the parent conversation history.${isolationGuideline}${scheduleGuideline}
+- Use thinking to control extended thinking level.${isolationGuideline}${scheduleGuideline}
 
 ## Writing the prompt
 
@@ -1806,18 +1745,10 @@ Terse command-style prompts produce shallow, generic work.
           description: "If true, agent gets no extension/MCP tools — only built-in tools.",
         }),
       ),
-      inherit_context: Type.Optional(
-        Type.Boolean({
-          description: "If true, fork parent conversation into the agent. Default: false (fresh context).",
-        }),
-      ),
       ...isolationParam(isWorktreeIsolationEnabled()),
       ...scheduleParam,
   });
 
-  // Held rather than registered inline: the mention clone reuses this exact
-  // definition, so the agent it starts is an ordinary top-level spawn instead
-  // of a second implementation that has to be kept in step with this one.
   const agentTool = defineTool({
     name: SUBAGENT_TOOL_NAMES.AGENT,
     label: "Agent",
@@ -1993,7 +1924,6 @@ Terse command-style prompts produce shallow, generic work.
         description: saved.description,
         subagent_type: saved.type,
         run_in_background: callParams.run_in_background,
-        max_turns: callParams.max_turns,
         isolation: undefined,
         schedule: undefined,
       };
@@ -2062,7 +1992,6 @@ Terse command-style prompts produce shallow, generic work.
       if (scopeVerdict.kind === "warn") ctx.ui.notify(scopeVerdict.message, "warning");
 
       const thinking = resolvedConfig.thinking;
-      const inheritContext = resolvedConfig.inheritContext;
       const runInBackground = resolvedConfig.runInBackground;
       const isolated = resolvedConfig.isolated;
       const isolation = resolvedConfig.isolation;
@@ -2106,16 +2035,10 @@ Terse command-style prompts produce shallow, generic work.
         // as a misleading "max turns: 0".
         maxTurns: normalizeMaxTurns(resolvedConfig.maxTurns),
         isolated,
-        // Neither is applied to a reopened conversation (runAgent, the
-        // manager), so neither is shown.
-        inheritContext: reopenOptions ? undefined : inheritContext,
         runInBackground,
         isolation: reopenOptions ? undefined : isolation,
       };
-      // Tool-result render shows the mode label too; viewer's header already does.
-      const modeLabel = getPromptModeLabel(subagentType);
-      const { tags: invocationTags } = buildInvocationTags(agentInvocation);
-      const agentTags = modeLabel ? [modeLabel, ...invocationTags] : invocationTags;
+      const { tags: agentTags } = buildInvocationTags(agentInvocation);
       const detailBase = {
         displayName,
         description: params.description,
@@ -2132,23 +2055,17 @@ Terse command-style prompts produce shallow, generic work.
        * further and ignores the model/thinking parameters outright — it runs on
        * the session it is reopening — so rendering the base there advertises
        * settings the run never used.
-       *
-       * The mode label is rebuilt rather than carried over: it hangs off the
-       * agent TYPE, not the invocation, so tags taken straight from
-       * buildInvocationTags would silently drop `twin`.
        */
       const detailBaseFor = (rec: AgentRecord | undefined): typeof detailBase => {
         if (!rec?.invocation) return detailBase;
         const type = rec.type;
         const { modelName: recModelName, tags } = buildInvocationTags(rec.invocation);
-        const recModeLabel = getPromptModeLabel(type);
-        const recTags = recModeLabel ? [recModeLabel, ...tags] : tags;
         return {
           displayName: getDisplayName(type),
           description: rec.description,
           subagentType: type,
           modelName: recModelName,
-          tags: recTags.length > 0 ? recTags : undefined,
+          tags: tags.length > 0 ? tags : undefined,
         };
       };
 
@@ -2159,9 +2076,6 @@ Terse command-style prompts produce shallow, generic work.
         }
         if (params.resume) {
           return textResult("Cannot combine `schedule` with `resume` — schedules create fresh agents.");
-        }
-        if (params.inherit_context) {
-          return textResult("Cannot combine `schedule` with `inherit_context` — there is no parent conversation at fire time.");
         }
         if (params.run_in_background === false) {
           return textResult("Cannot combine `schedule` with `run_in_background: false` — scheduled jobs always run in background.");
@@ -2205,7 +2119,7 @@ Terse command-style prompts produce shallow, generic work.
         }
         // Not `effectiveMaxTurns`: that was resolved for `subagent_type`, which
         // a resume ignores, so it may describe another agent.
-        const resumeMaxTurns = resumeTurnLimit(existing, params.max_turns);
+        const resumeMaxTurns = resumeTurnLimit(existing);
 
         // Background resume: detached run that notifies on completion, mirroring
         // a background spawn. Previously run_in_background was silently ignored
@@ -2332,7 +2246,6 @@ Terse command-style prompts produce shallow, generic work.
           model,
           maxTurns: effectiveMaxTurns,
           isolated,
-          inheritContext,
           thinkingLevel: thinking,
           isBackground: true,
           isolation,
@@ -2485,7 +2398,6 @@ Terse command-style prompts produce shallow, generic work.
           model,
           maxTurns: effectiveMaxTurns,
           isolated,
-          inheritContext,
           thinkingLevel: thinking,
           isolation,
           invocation: agentInvocation,
@@ -2568,11 +2480,9 @@ Terse command-style prompts produce shallow, generic work.
    * folds it into `getSessionStats()`, which is what the footer, the statusline
    * and `/cost` read — so this is the whole of "report usage to the parent".
    *
-   * Nothing is attached to a call with no tool-call id. That is the `@handle`
-   * mention path (`mention-clone.ts`), which invokes this tool from a fork of the
-   * conversation that is discarded moments later: the result never becomes a
-   * message in the real session, so usage hung on it would be spend the user paid
-   * for and nobody counted. Skipping leaves it pending for the next real result.
+   * Nothing is attached to a call with no tool-call id: such a result never
+   * becomes a message in the session, so usage hung on it would go uncounted.
+   * Skipping leaves it pending for the next real result.
    */
   function withUsageReporting<T extends { execute: (...args: any[]) => any }>(tool: T): T {
     return {
@@ -2589,8 +2499,6 @@ Terse command-style prompts produce shallow, generic work.
     pi.registerTool(withUsageReporting(tool));
   }
 
-  // The mention path is handed THIS object, not the bare `agentTool` — see the
-  // mention-clone header on why the clone must call the registered tool.
   const registeredAgentTool = withUsageReporting(agentTool);
   pi.registerTool(registeredAgentTool);
 
@@ -3017,6 +2925,27 @@ Terse command-style prompts produce shallow, generic work.
     });
   }
 
+  /** The "Agent / Type / Description" block that heads a `get_subagent_result` or `stop_subagent` result. */
+  function recordHeader(record: AgentRecord, statusNote: string): string {
+    const duration = formatDuration(record.startedAt, record.completedAt);
+    const tokens = formatLifetimeTokens(record);
+    const contextPercent = getSessionContextPercent(record.session);
+    const statsParts = [`Tool uses: ${record.toolUses}`];
+    if (tokens) statsParts.push(tokens);
+    if (showCost) {
+      const costText = formatCost(getLifetimeCost(record.lifetimeUsage));
+      if (costText) statsParts.push(`Cost: ${costText}`);
+    }
+    if (contextPercent !== null) statsParts.push(`Context: ${Math.round(contextPercent)}%`);
+    if (record.compactionCount) statsParts.push(`Compactions: ${record.compactionCount}`);
+    statsParts.push(`Duration: ${duration}`);
+    return (
+      `Agent: ${record.id}\n` +
+      `Type: ${getDisplayName(record.type)} | Status: ${record.status}${statusNote} | ${statsParts.join(" | ")}\n` +
+      `Description: ${record.description}`
+    );
+  }
+
   // ---- get_subagent_result tool ----
 
   registerToolReportingUsage(defineTool({
@@ -3071,24 +3000,7 @@ Terse command-style prompts produce shallow, generic work.
         if (record.promise) await abortable(record.promise, signal);
       }
 
-      const displayName = getDisplayName(record.type);
-      const duration = formatDuration(record.startedAt, record.completedAt);
-      const tokens = formatLifetimeTokens(record);
-      const contextPercent = getSessionContextPercent(record.session);
-      const statsParts = [`Tool uses: ${record.toolUses}`];
-      if (tokens) statsParts.push(tokens);
-      if (showCost) {
-        const costText = formatCost(getLifetimeCost(record.lifetimeUsage));
-        if (costText) statsParts.push(`Cost: ${costText}`);
-      }
-      if (contextPercent !== null) statsParts.push(`Context: ${Math.round(contextPercent)}%`);
-      if (record.compactionCount) statsParts.push(`Compactions: ${record.compactionCount}`);
-      statsParts.push(`Duration: ${duration}`);
-
-      let output =
-        `Agent: ${record.id}\n` +
-        `Type: ${displayName} | Status: ${record.status}${getStatusNote(record.status)} | ${statsParts.join(" | ")}\n` +
-        `Description: ${record.description}\n\n`;
+      let output = `${recordHeader(record, getStatusNote(record.status))}\n\n`;
 
       if (record.status === "running") {
         output += "Agent is still running. Use wait: true or check back later.";
@@ -3123,7 +3035,8 @@ Terse command-style prompts produce shallow, generic work.
     label: "Steer Agent",
     description:
       "Send a steering message to a running agent. The message will interrupt the agent after its current tool execution " +
-      "and be injected into its conversation, allowing you to redirect its work mid-run. Only works on running agents.",
+      "and be injected into its conversation, allowing you to redirect its work mid-run. Only works on running agents. " +
+      "To make an agent stop, use stop_subagent; a steering message cannot stop it.",
     promptSnippet: "Send a steering message to redirect a running background agent",
     parameters: Type.Object({
       agent_id: Type.String({
@@ -3170,6 +3083,47 @@ Terse command-style prompts produce shallow, generic work.
       } catch (err) {
         return textResult(`Failed to steer agent: ${err instanceof Error ? err.message : String(err)}`);
       }
+    },
+  }));
+
+  // ---- stop_subagent tool ----
+
+  registerToolReportingUsage(defineTool({
+    name: SUBAGENT_TOOL_NAMES.STOP,
+    label: "Stop Agent",
+    description:
+      "Stop a running or queued agent immediately. Its partial output is returned. " +
+      "Use this instead of steer_subagent when you want an agent to stop.",
+    promptSnippet: "Stop a running or queued agent and get its partial output",
+    parameters: Type.Object({
+      agent_id: Type.String({
+        description: "The agent ID to stop (must be running or queued). The agent's handle also works: its `name` if you gave it one, otherwise its type (`explore`, `explore-2`).",
+      }),
+    }),
+    execute: async (_toolCallId, params, signal, _onUpdate, _ctx) => {
+      const record = resolveAgentRef(params.agent_id);
+      if (!record || !isTopLevelAgent(record)) {
+        return textResult(`Agent not found: "${params.agent_id}". It may have been cleaned up.`);
+      }
+      if (record.status !== "running" && record.status !== "queued") {
+        return textResult(
+          `Agent ${record.id} already finished (status: ${record.status}). Use get_subagent_result to retrieve its output.`,
+        );
+      }
+
+      const wasQueued = record.status === "queued";
+      manager.abort(record.id);
+      // Marked before the run settles so its completion notification is suppressed.
+      record.resultConsumed = true;
+      outbox.cancel(record.id);
+
+      // A queued agent has no promise.
+      if (record.promise) await waitForSettle(record.promise, signal);
+
+      return textResult(
+        `${recordHeader(record, "")}\n\n` +
+        `Agent ${record.id} stopped${wasQueued ? " before it started" : ""}.${partialOutputSuffix(record, "stop")}`,
+      );
     },
   }));
 
@@ -3595,11 +3549,9 @@ tools: <comma-separated built-in tools: read, bash, edit, write, grep, find, ls.
 model: <optional model as "provider/modelId", e.g. "anthropic/claude-haiku-4-5". Omit to inherit parent model>
 thinking: <optional thinking level: ${THINKING_LEVELS.join(", ")}. Omit to inherit>
 max_turns: <optional max agentic turns. 0 or omit for unlimited (default)>
-prompt_mode: <"replace" (body IS the full system prompt) or "append" (body is appended to default prompt). Default: replace>
 extensions: <true (inherit all MCP/extension tools), false (none), or comma-separated names. Default: true>
 skills: <true (inherit all), false (none), or comma-separated skill names to preload into prompt. Default: true>
 disallowed_tools: <comma-separated tool names to block, even if otherwise available. Omit for none>
-inherit_context: <true to fork parent conversation into agent so it sees chat history. Default: false>
 run_in_background: <pin this agent to background (true) or foreground (false). Omit to follow the backgroundByDefault setting, which is background>
 output_transcript: <false to write no transcript file or path for this agent. Independent of persist_session. Default: true>
 isolated: <true for no extension/MCP tools, only built-in tools. Default: false>
@@ -3620,9 +3572,7 @@ memory: <"user" (global), "project" (per-project), or "local" (gitignored per-pr
 Guidelines for choosing settings:
 - For read-only tasks (review, analysis): tools: read, bash, grep, find, ls
 - For code modification tasks: include edit, write
-- Use prompt_mode: append if the agent should keep the default system prompt and add specialization on top
-- Use prompt_mode: replace for fully custom agents with their own personality/instructions
-- Set inherit_context: true if the agent needs to know what was discussed in the parent conversation
+- The body is added to pi's normal system prompt as the agent's instructions; every subagent starts with a fresh conversation
 - Set isolated: true if the agent should NOT have access to MCP servers or other extensions
 - Set output_transcript: false to skip writing this agent's transcript; this alone doesn't keep the run off disk (persist_session, isolation: worktree commits, and memory still write) — set those too if that's the goal
 - Only include frontmatter fields that differ from defaults — omit fields where the default is fine
@@ -4002,9 +3952,9 @@ Write the file using the write tool. Only write the file, nothing else.`;
         {
           id: "agentMentions",
           label: "Agent mentions",
-          description: "Route `@handle message` at the prompt to that agent. model = an off-screen clone of this conversation calls the Agent tool, so the agent gets a context-written prompt, a transcript and per-tool detail, and the chat stays clean; direct = started here from your text, no model call. Messaging and resuming are direct either way.",
+          description: "Route `@handle message` at the prompt to that agent: started here from your text with no model call, running agents are messaged, finished ones resumed.",
           currentValue: getAgentMentionMode(),
-          values: ["model", "direct", "off"],
+          values: ["direct", "off"],
         },
         {
           id: "rememberAgents",
@@ -4191,9 +4141,7 @@ Write the file using the write tool. Only write the file, nothing else.`;
           ctx,
           mode === "off"
             ? "Agent mentions disabled"
-            : mode === "model"
-              ? "Agent mentions on — a conversation clone starts a mentioned agent off-screen"
-              : "Agent mentions on — a mentioned agent starts here, with no model call",
+            : "Agent mentions on - a mentioned agent starts here, with no model call",
         );
       } else if (id === "rememberAgents") {
         const enabled = value === "on";

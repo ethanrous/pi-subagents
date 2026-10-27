@@ -45,7 +45,6 @@ const BADGED_CONFIG: AgentConfig = {
   extensions: false,
   skills: false,
   systemPrompt: "Review code.",
-  promptMode: "replace",
 };
 
 /**

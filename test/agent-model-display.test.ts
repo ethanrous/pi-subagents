@@ -171,28 +171,6 @@ describe("Agent tool result — effective model", () => {
       .render(200).join("\n")).toContain("opus 4.6");
   });
 
-  it("keeps the twin label beside the model", async () => {
-    // The mode label hangs off the agent type, not the invocation, so anything
-    // that rebuilds tags from the invocation alone silently drops it.
-    vi.mocked(runAgent).mockImplementation(async (_c: any, _t: any, _p: any, options: any) => {
-      const s = session("anthropic", "claude-opus-4-6", "high");
-      options.onSessionCreated?.(s);
-      return { responseText: "done", session: s, aborted: false, steered: false } as never;
-    });
-    const tool = agentTool();
-
-    const result = await tool.execute(
-      "tc-2",
-      { prompt: "go", description: "d", subagent_type: "general-purpose", run_in_background: false },
-      undefined,
-      vi.fn(),
-      ctx(),
-    );
-
-    expect(result.details.tags).toContain("twin");
-    expect(render(tool, result)).toContain("twin");
-  });
-
   it("reports the session's level, and what was asked for, when pi clamps it", async () => {
     vi.mocked(runAgent).mockImplementation(async (_c: any, _t: any, _p: any, options: any) => {
       const s = session("anthropic", "claude-haiku-4-5", "high");

@@ -90,8 +90,6 @@ describe("tool veto reachability against real pi-mono", () => {
             extSelectors: ["ext:ext-alpha.mjs"],
             skills: false,
             systemPrompt: "You are veto.",
-            promptMode: "replace",
-            inheritContext: false,
             runInBackground: false,
             isolated: false,
           } as AgentConfig,

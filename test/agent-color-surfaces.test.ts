@@ -17,7 +17,6 @@ const config: AgentConfig = {
   extensions: false,
   skills: false,
   systemPrompt: "Review code.",
-  promptMode: "replace",
 };
 
 const theme = {

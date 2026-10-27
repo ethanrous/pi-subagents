@@ -210,8 +210,6 @@ function loadOneFile(path: string, agents: Map<string, AgentConfig>, source: Age
     sessionDir: str(fm.session_dir),
     allowedSubagents: parseAllowedSubagents(fm.allowed_subagents),
     systemPrompt: body.trim(),
-    promptMode: fm.prompt_mode === "append" ? "append" : "replace",
-    inheritContext: fm.inherit_context != null ? fm.inherit_context === true : undefined,
     runInBackground: fm.run_in_background != null ? fm.run_in_background === true : undefined,
     isolated: fm.isolated != null ? fm.isolated === true : undefined,
     memory: parseMemory(fm.memory),

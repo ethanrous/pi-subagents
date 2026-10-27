@@ -436,7 +436,8 @@ describe("buildNewAgentFile", () => {
 
   it("emits the fields the wizard collects, and omits the ones left on inherit", () => {
     const full = parse(buildNewAgentFile({ ...base, model: "anthropic/x", thinking: "high" }));
-    expect(full).toMatchObject({ tools: "read, grep", model: "anthropic/x", thinking: "high", prompt_mode: "replace" });
+    expect(full).toMatchObject({ tools: "read, grep", model: "anthropic/x", thinking: "high" });
+    expect(full).not.toHaveProperty("prompt_mode");
 
     const minimal = parse(buildNewAgentFile(base));
     expect(minimal.model).toBeUndefined();

@@ -117,7 +117,7 @@ describe("settings persistence", () => {
   });
 
   it("round-trips agentMentions modes; drops an unknown one", () => {
-    for (const mode of ["model", "direct", "off"] as const) {
+    for (const mode of ["direct", "off"] as const) {
       saveSettings({ agentMentions: mode }, projectDir);
       expect(loadSettings(projectDir)).toEqual({ agentMentions: mode });
     }
@@ -125,12 +125,11 @@ describe("settings persistence", () => {
     expect(loadSettings(projectDir)).toEqual({}); // unknown mode dropped
   });
 
-  it("reads the pre-mode agentMentions booleans as their modes", () => {
-    // The setting shipped as a boolean before `model` existed, so a config
-    // written then — or hand-written from the old README — must keep working.
-    // `true` meant "on", and on is now `model`.
+  it("reads the legacy agentMentions booleans and `model` value as their modes", () => {
     writeProject({ agentMentions: true } as any);
-    expect(loadSettings(projectDir)).toEqual({ agentMentions: "model" });
+    expect(loadSettings(projectDir)).toEqual({ agentMentions: "direct" });
+    writeProject({ agentMentions: "model" } as any);
+    expect(loadSettings(projectDir)).toEqual({ agentMentions: "direct" });
     writeProject({ agentMentions: false } as any);
     expect(loadSettings(projectDir)).toEqual({ agentMentions: "off" });
   });

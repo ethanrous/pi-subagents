@@ -227,7 +227,6 @@ export function buildNewAgentFile(input: NewAgentInput): string {
   return `---
 description: ${JSON.stringify(input.description)}
 tools: ${input.tools}${modelLine}${thinkingLine}
-prompt_mode: replace
 ---
 
 ${input.systemPrompt}
@@ -270,14 +269,12 @@ export function serializeAgentFile(cfg: AgentConfig): string {
   if (cfg.allowedSubagents !== undefined) {
     fmFields.push(`allowed_subagents: ${cfg.allowedSubagents === "all" ? "all" : cfg.allowedSubagents.join(", ")}`);
   }
-  fmFields.push(`prompt_mode: ${cfg.promptMode}`);
   if (cfg.extensions === false) fmFields.push("extensions: false");
   else if (Array.isArray(cfg.extensions)) fmFields.push(`extensions: ${cfg.extensions.join(", ")}`);
   if (cfg.excludeExtensions?.length) fmFields.push(`exclude_extensions: ${cfg.excludeExtensions.join(", ")}`);
   if (cfg.skills === false) fmFields.push("skills: false");
   else if (Array.isArray(cfg.skills)) fmFields.push(`skills: ${cfg.skills.join(", ")}`);
   if (cfg.disallowedTools?.length) fmFields.push(`disallowed_tools: ${cfg.disallowedTools.join(", ")}`);
-  if (cfg.inheritContext) fmFields.push("inherit_context: true");
   // Both cases, not just `true`: with `backgroundByDefault` on, omitting the
   // field means background, so `false` is the only way to pin an agent file to
   // foreground and is no longer interchangeable with absence. Reachable since

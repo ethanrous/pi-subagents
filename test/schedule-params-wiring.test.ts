@@ -166,18 +166,6 @@ describe("Agent tool → schedule restrictions", () => {
     }
   });
 
-  it("refuses `schedule` with `inherit_context` — no parent conversation at fire time", async () => {
-    const { reply, jobCount, restore } = await scheduleCall({ inherit_context: true });
-    try {
-      expect(reply).toBe(
-        "Cannot combine `schedule` with `inherit_context` — there is no parent conversation at fire time.",
-      );
-      expect(jobCount).toBe(0);
-    } finally {
-      restore();
-    }
-  });
-
   it("refuses `schedule` with `run_in_background: false` rather than silently coercing it", async () => {
     // README:91 long claimed this parameter was "forced to true". It is not —
     // the call is refused. Silently flipping a parameter the caller explicitly

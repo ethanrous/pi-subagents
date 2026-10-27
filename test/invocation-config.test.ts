@@ -10,8 +10,6 @@ function makeConfig(overrides: Partial<AgentConfig> = {}): AgentConfig {
     extensions: false,
     skills: false,
     systemPrompt: "Test agent",
-    promptMode: "replace",
-    inheritContext: false,
     runInBackground: false,
     isolated: false,
     ...overrides,
@@ -25,7 +23,6 @@ describe("resolveAgentInvocationConfig", () => {
         model: "provider/config-model",
         thinking: "high",
         maxTurns: 42,
-        inheritContext: false,
         runInBackground: false,
         isolated: false,
         isolation: "worktree",
@@ -33,7 +30,6 @@ describe("resolveAgentInvocationConfig", () => {
       {
         model: "provider/param-model",
         thinking: "minimal",
-        inherit_context: true,
         run_in_background: true,
         isolated: true,
         isolation: "worktree",
@@ -45,7 +41,6 @@ describe("resolveAgentInvocationConfig", () => {
     expect(resolved.modelFromParams).toBe(true);
     expect(resolved.thinking).toBe("high");
     expect(resolved.maxTurns).toBe(42);
-    expect(resolved.inheritContext).toBe(false);
     expect(resolved.runInBackground).toBe(false);
     expect(resolved.isolated).toBe(false);
     expect(resolved.isolation).toBe("worktree");
@@ -55,7 +50,6 @@ describe("resolveAgentInvocationConfig", () => {
     const resolved = resolveAgentInvocationConfig(undefined, {
       model: "provider/param-model",
       thinking: "minimal",
-      inherit_context: true,
       run_in_background: true,
       isolated: true,
       isolation: "worktree",
@@ -64,7 +58,6 @@ describe("resolveAgentInvocationConfig", () => {
     expect(resolved.modelInput).toBe("provider/param-model");
     expect(resolved.modelFromParams).toBe(true);
     expect(resolved.thinking).toBe("minimal");
-    expect(resolved.inheritContext).toBe(true);
     expect(resolved.runInBackground).toBe(true);
     expect(resolved.isolated).toBe(true);
     expect(resolved.isolation).toBe("worktree");
@@ -85,18 +78,15 @@ describe("resolveAgentInvocationConfig", () => {
   it("lets parent fill in booleans when config leaves them undefined", () => {
     const resolved = resolveAgentInvocationConfig(
       makeConfig({
-        inheritContext: undefined,
         runInBackground: undefined,
         isolated: undefined,
       }),
       {
-        inherit_context: true,
         run_in_background: true,
         isolated: true,
       },
     );
 
-    expect(resolved.inheritContext).toBe(true);
     expect(resolved.runInBackground).toBe(true);
     expect(resolved.isolated).toBe(true);
   });
@@ -104,14 +94,12 @@ describe("resolveAgentInvocationConfig", () => {
   it("defaults booleans to false when neither config nor params set them", () => {
     const resolved = resolveAgentInvocationConfig(
       makeConfig({
-        inheritContext: undefined,
         runInBackground: undefined,
         isolated: undefined,
       }),
       {},
     );
 
-    expect(resolved.inheritContext).toBe(false);
     expect(resolved.runInBackground).toBe(false);
     expect(resolved.isolated).toBe(false);
   });

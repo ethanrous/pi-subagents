@@ -292,6 +292,7 @@ describe("Agent tool — background resume wiring", () => {
   // resume branch handed the effective max_turns or a turn counter to the
   // runner, so a resumed agent ran unbounded and its widget stayed at turn 1.
   it("passes the effective turn limit and a turn counter to a background resume (#368)", async () => {
+    writeFileSync(join(cwd, ".pi", "subagents.json"), JSON.stringify({ schedulingEnabled: false, defaultMaxTurns: 7 }));
     const { pi, tools, lifecycle } = makePi();
     subagentsExtension(pi);
     const ctx = makeCtx(cwd);
@@ -300,7 +301,7 @@ describe("Agent tool — background resume wiring", () => {
     vi.mocked(resumeAgent).mockClear();
     await tools.get("Agent").execute(
       "resume-call",
-      { prompt: "keep going", description: "Keep going", subagent_type: "general-purpose", resume: id, run_in_background: true, max_turns: 7 },
+      { prompt: "keep going", description: "Keep going", subagent_type: "general-purpose", resume: id, run_in_background: true },
       undefined,
       undefined,
       ctx,
@@ -316,6 +317,7 @@ describe("Agent tool — background resume wiring", () => {
   });
 
   it("passes the effective turn limit to a foreground resume (#368)", async () => {
+    writeFileSync(join(cwd, ".pi", "subagents.json"), JSON.stringify({ schedulingEnabled: false, defaultMaxTurns: 7 }));
     const { pi, tools, lifecycle } = makePi();
     subagentsExtension(pi);
     const ctx = makeCtx(cwd);
@@ -324,7 +326,7 @@ describe("Agent tool — background resume wiring", () => {
     vi.mocked(resumeAgent).mockClear();
     await tools.get("Agent").execute(
       "resume-call",
-      { prompt: "keep going", description: "Keep going", subagent_type: "general-purpose", resume: id, run_in_background: false, max_turns: 7 },
+      { prompt: "keep going", description: "Keep going", subagent_type: "general-purpose", resume: id, run_in_background: false },
       undefined,
       undefined,
       ctx,

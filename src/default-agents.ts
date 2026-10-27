@@ -16,12 +16,11 @@ export const DEFAULT_AGENTS: Map<string, AgentConfig> = new Map([
       displayName: "Agent",
       description: "General-purpose agent for researching complex questions, searching for code, and executing multi-step tasks. When you are searching for a keyword or file and are not confident that you will find the right match in the first few tries use this agent to perform the search for you.",
       // builtinToolNames omitted — means "all available tools" (resolved at lookup time)
-      // inheritContext / runInBackground / isolated omitted — strategy fields, callers decide per-call.
+      // runInBackground / isolated omitted — strategy fields, callers decide per-call.
       // Setting them to false would lock callsite intent (see resolveAgentInvocationConfig in invocation-config.ts).
       extensions: true,
       skills: true,
       systemPrompt: "",
-      promptMode: "append",
       isDefault: true,
     },
   ],
@@ -65,7 +64,6 @@ Use Bash ONLY for read-only operations: ls, git status, git log, git diff, find,
 - Report findings as regular messages
 - Do not use emojis
 - Be thorough and precise`,
-      promptMode: "replace",
       isDefault: true,
     },
   ],
@@ -118,7 +116,6 @@ You are STRICTLY PROHIBITED from:
 ### Critical Files for Implementation
 List 3-5 files most critical for implementing this plan:
 - /absolute/path/to/file.ts - [Brief reason]`,
-      promptMode: "replace",
       isDefault: true,
     },
   ],

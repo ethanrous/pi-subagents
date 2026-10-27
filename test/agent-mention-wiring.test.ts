@@ -20,14 +20,8 @@ vi.mock("../src/agent-runner.js", async () => {
   return { ...actual, runAgent: vi.fn(), resumeAgent: vi.fn() };
 });
 
-// The clone forks a real pi session and runs a real model turn. What this file
-// pins is the wiring around it — when it is called, with what, and what happens
-// when it comes back empty. mention-clone.test.ts covers the clone itself.
-vi.mock("../src/mention-clone.js", () => ({ runMentionClone: vi.fn() }));
-
 import { getDefaultMaxTurns, resumeAgent, runAgent, setDefaultMaxTurns } from "../src/agent-runner.js";
 import subagentsExtension from "../src/index.js";
-import { runMentionClone } from "../src/mention-clone.js";
 import { ctx, flush, type Hermetic, hermeticDir, makePi, textOf } from "./helpers/boot-extension.js";
 
 let hermetic: Hermetic | undefined;
@@ -37,8 +31,6 @@ let booted: Map<string, any> | undefined;
 beforeEach(() => {
   vi.mocked(runAgent).mockReset();
   vi.mocked(resumeAgent).mockReset();
-  vi.mocked(runMentionClone).mockReset();
-  vi.mocked(runMentionClone).mockResolvedValue({ spawned: true });
 });
 
 afterEach(async () => {
@@ -93,16 +85,6 @@ function boot(settings: Record<string, unknown> = {}, agentFiles?: Record<string
   subagentsExtension(b.pi);
   booted = b.lifecycle;
   return b;
-}
-
-/**
- * Boot with a mention that names a not-yet-running agent starting it HERE
- * rather than through a clone of the conversation. Messaging and resuming are
- * direct in either mode, so only the tests that START an agent by mention need
- * this — every other `boot()` below is on the default `model` mode.
- */
-function bootDirect(settings: Record<string, unknown> = {}, agentFiles?: Record<string, string>) {
-  return boot({ agentMentions: "direct", ...settings }, agentFiles);
 }
 
 async function spawnBackground(tools: Map<string, any>, subagent_type = "Explore"): Promise<string> {
@@ -383,7 +365,7 @@ describe("resolving which agent a handle means", () => {
     // Nested agents are hidden from every top-level surface and only their
     // owner may steer them. The handle still resolves — to a NEW top-level
     // Explore — rather than punching through the ownership boundary.
-    const { tools, lifecycle } = bootDirect();
+    const { tools, lifecycle } = boot();
     const child = fakeSession();
     heldRun(child);
 
@@ -402,7 +384,7 @@ describe("resolving which agent a handle means", () => {
   it("starts a fresh agent once the old record has been evicted", async () => {
     // README: handles live as long as their record, and after that the same
     // mention starts a new agent rather than resurrecting anything.
-    const { tools, lifecycle } = bootDirect();
+    const { tools, lifecycle } = boot();
     finishedRun(fakeSession());
 
     const id = await spawnBackground(tools);
@@ -425,7 +407,7 @@ describe("resolving which agent a handle means", () => {
 
 describe("mentioning an agent that has never run", () => {
   it("starts one, using the message as its prompt", async () => {
-    const { lifecycle } = bootDirect();
+    const { lifecycle } = boot();
     heldRun(fakeSession());
 
     const uiCtx = ctx();
@@ -448,7 +430,7 @@ describe("mentioning an agent that has never run", () => {
   it("leaves model, thinking and max turns to the agent's own config", async () => {
     // runAgent resolves all three from the config when the spawn omits them,
     // so passing anything here would override frontmatter the user wrote.
-    const { lifecycle } = bootDirect();
+    const { lifecycle } = boot();
     heldRun(fakeSession());
 
     await send(lifecycle, "@explore go");
@@ -466,7 +448,7 @@ describe("mentioning an agent that has never run", () => {
     // the row reads `↻1` where the Agent tool would read `↻1≤9`.
     const prevMax = getDefaultMaxTurns();
     try {
-      const { lifecycle } = bootDirect({ defaultMaxTurns: 9 });
+      const { lifecycle } = boot({ defaultMaxTurns: 9 });
       heldRun(fakeSession());
       let factory: any;
       const uiCtx = ctx({
@@ -495,7 +477,7 @@ describe("mentioning an agent that has never run", () => {
     // activity tracker is normally created. Without one the widget and
     // FleetView have no tool name and no turn count for the agent, so its row
     // reads `thinking…` from start to finish.
-    const { lifecycle } = bootDirect();
+    const { lifecycle } = boot();
     heldRun(fakeSession());
 
     await send(lifecycle, "@explore go");
@@ -507,7 +489,7 @@ describe("mentioning an agent that has never run", () => {
   });
 
   it("runs it in the background so the prompt is not blocked", async () => {
-    const { lifecycle } = bootDirect();
+    const { lifecycle } = boot();
     heldRun(fakeSession());
 
     await send(lifecycle, "@explore go");
@@ -520,7 +502,7 @@ describe("mentioning an agent that has never run", () => {
   });
 
   it("messages the running agent rather than starting a second one", async () => {
-    const { lifecycle } = bootDirect();
+    const { lifecycle } = boot();
     const session = fakeSession();
     heldRun(session);
 
@@ -536,7 +518,7 @@ describe("mentioning an agent that has never run", () => {
   });
 
   it("reports a failed start instead of silently doing nothing", async () => {
-    const { lifecycle } = bootDirect();
+    const { lifecycle } = boot();
     vi.mocked(runAgent).mockImplementation(() => {
       throw new Error("worktree unavailable");
     });
@@ -556,232 +538,18 @@ describe("mentioning an agent that has never run", () => {
   });
 });
 
-describe("an agent file's inherit_context on a mention start (#300)", () => {
-  // A mention is the user starting the agent from this session, so the file
-  // decides in either mode — unlike RPC, where the caller does. Model mode's
-  // clone spawn goes through the Agent tool, which already applies it; these
-  // pin the two paths that spawn directly.
-  const memo = { memo: "---\ndescription: summarizes the session\ninherit_context: true\n---\nbody" };
-
-  it("hands the conversation to a direct-mode start", async () => {
-    const { lifecycle } = bootDirect({}, memo);
-    heldRun(fakeSession());
-
-    await send(lifecycle, "@memo summarize what we did");
-
-    expect(runAgent).toHaveBeenCalledWith(
-      expect.anything(),
-      "memo",
-      "summarize what we did",
-      expect.objectContaining({ inheritContext: true }),
-    );
-  });
-
-  it("hands the conversation to the fallback when the clone cannot start it", async () => {
-    const { lifecycle } = boot({}, memo);
-    heldRun(fakeSession());
-    vi.mocked(runMentionClone).mockResolvedValue({ spawned: false, error: "no session file" });
-
-    await send(lifecycle, "@memo summarize what we did");
-    await flush();
-
-    expect(runAgent).toHaveBeenCalledWith(
-      expect.anything(),
-      "memo",
-      "summarize what we did",
-      expect.objectContaining({ inheritContext: true }),
-    );
-  });
-
-  it("reads the agent file as it is now, not as it was at boot", async () => {
-    // The spawn reloads agent files before resolving model, thinking and max
-    // turns; inherit_context must not be the one field read from the old copy.
-    const { lifecycle } = bootDirect({}, { memo: "---\ndescription: summarizes the session\n---\nbody" });
-    heldRun(fakeSession());
-    writeFileSync(join(process.cwd(), ".pi", "agents", "memo.md"), memo.memo);
-
-    await send(lifecycle, "@memo summarize what we did");
-
-    expect(runAgent).toHaveBeenCalledWith(
-      expect.anything(),
-      "memo",
-      "summarize what we did",
-      expect.objectContaining({ inheritContext: true }),
-    );
-  });
-
-  it("forces nothing for an agent whose file does not ask", async () => {
-    const { lifecycle } = bootDirect();
-    heldRun(fakeSession());
-
-    await send(lifecycle, "@explore go");
-
-    expect((vi.mocked(runAgent).mock.calls[0][3] as any).inheritContext).toBeUndefined();
-  });
-});
-
-describe("letting a clone of the conversation start the agent", () => {
-  /** The clone stands in for a real forked session; mention-clone.test.ts covers the real one. */
-  function cloneReturns(result: { spawned: boolean; error?: string }) {
-    vi.mocked(runMentionClone).mockResolvedValue(result);
-  }
-
-  it("claims the turn, so nothing about the mention reaches the chat", async () => {
-    // The whole point of the clone: the model still decides how to invoke the
-    // agent, but it does so somewhere the user is not reading.
-    const { pi, lifecycle } = boot();
-    cloneReturns({ spawned: true });
-
-    const result = await send(lifecycle, "@explore find the flaky test");
-    await flush();
-
-    expect(result).toEqual({ action: "handled" });
-    expect(pi.sendMessage).not.toHaveBeenCalled();
-    expect(runAgent).not.toHaveBeenCalled();
-  });
-
-  it("hands the clone the resolved type, the message and the real Agent tool", async () => {
-    // The type, not the handle as typed — `subagent_type` is not lowercased.
-    // The tool must be the registered one, or the clone's spawn would be a
-    // second implementation rather than an ordinary top-level call.
-    const { tools, lifecycle } = boot();
-    cloneReturns({ spawned: true });
-
-    await send(lifecycle, "@plan sketch the migration");
-    await flush();
-
-    expect(runMentionClone).toHaveBeenCalledWith(
-      expect.objectContaining({
-        type: "Plan",
-        message: "sketch the migration",
-        agentTool: tools.get("Agent"),
-      }),
-    );
-  });
-
-  it("does not block the prompt on the clone's turn", async () => {
-    // prompt() is suspended until this hook returns, so awaiting a full model
-    // turn here would freeze the editor for its duration.
-    const { lifecycle } = boot();
-    let release: (() => void) | undefined;
-    vi.mocked(runMentionClone).mockReturnValue(
-      new Promise((resolve) => {
-        release = () => resolve({ spawned: true });
-      }),
-    );
-
-    const result = await send(lifecycle, "@explore find the flaky test");
-
-    expect(result).toEqual({ action: "handled" });
-    release?.();
-  });
-
-  it("says the agent is being prompted, not started — nothing runs yet", async () => {
-    const { lifecycle } = boot();
-    cloneReturns({ spawned: true });
-
-    const uiCtx = ctx();
-    await lifecycle.get("input")(
-      { type: "input", text: "@explore find the flaky test", source: "interactive" },
-      uiCtx,
-    );
-
-    // The clone's turn happens first, so the agent does not exist yet. `direct`
-    // mode's "Started @explore" is the contrast: there, it does.
-    expect(uiCtx.ui.notify).toHaveBeenCalledWith("Prompting @explore…", "info");
-  });
-
-  it("starts the agent directly when the clone cannot", async () => {
-    // A mention that produced a toast and no agent would be the worst outcome:
-    // silent, and indistinguishable from success.
+describe("headless input", () => {
+  it("leaves a mention to the main model outside the TUI", async () => {
     const { lifecycle } = boot();
     heldRun(fakeSession());
-    cloneReturns({ spawned: false, error: "no session file" });
-
-    const uiCtx = ctx();
-    await lifecycle.get("input")(
-      { type: "input", text: "@explore find the flaky test", source: "interactive" },
-      uiCtx,
-    );
-    await flush();
-
-    expect(runAgent).toHaveBeenCalled();
-    expect(uiCtx.ui.notify).toHaveBeenCalledWith(
-      "Started @explore directly — no session file",
-      "warning",
-    );
-  });
-
-  it("reports a fallback that also fails rather than going quiet", async () => {
-    const { lifecycle } = boot();
-    vi.mocked(runAgent).mockImplementation(() => {
-      throw new Error("worktree unavailable");
-    });
-    cloneReturns({ spawned: false, error: "no session file" });
-
-    const uiCtx = ctx();
-    await lifecycle.get("input")(
-      { type: "input", text: "@explore find the flaky test", source: "interactive" },
-      uiCtx,
-    );
-    await flush();
-
-    expect(uiCtx.ui.notify).toHaveBeenCalledWith(
-      expect.stringContaining("Could not start @explore"),
-      "error",
-    );
-  });
-
-  it("still steers a running agent directly, without cloning anything", async () => {
-    const { tools, lifecycle } = boot();
-    const session = fakeSession();
-    heldRun(session);
-
-    await spawnBackground(tools);
-    await flush();
-
-    expect(await send(lifecycle, "@explore also check the RPC path")).toEqual({ action: "handled" });
-    expect(session.steer).toHaveBeenCalledWith("also check the RPC path");
-    expect(runMentionClone).not.toHaveBeenCalled();
-  });
-
-  it("still resumes a finished agent directly, without cloning anything", async () => {
-    const { tools, lifecycle } = boot();
-    const session = fakeSession();
-    finishedRun(session);
-    vi.mocked(resumeAgent).mockResolvedValue({ text: "second answer", failure: undefined } as any);
-
-    await spawnBackground(tools);
-    await flush();
-
-    expect(await send(lifecycle, "@explore anything else?")).toEqual({ action: "handled" });
-    expect(resumeAgent).toHaveBeenCalledWith(session, "anything else?", expect.anything());
-    expect(runMentionClone).not.toHaveBeenCalled();
-  });
-
-  it("does not clone for a handle that names no agent", async () => {
-    // Otherwise `@nosuchagent hello` would spin up a conversation copy to
-    // invoke an agent that does not exist, and eat the prompt doing it.
-    const { lifecycle } = boot();
-
-    expect(await send(lifecycle, "@nosuchagent hello")).toEqual({ action: "continue" });
-    expect(runMentionClone).not.toHaveBeenCalled();
-  });
-
-  it("works headlessly, where the visible-turn version never could", async () => {
-    // The TUI-only guard exists because a claimed turn answers `pi -p` with
-    // silence. The clone starts a real agent whose completion still reports.
-    const { lifecycle } = boot();
-    cloneReturns({ spawned: true });
 
     const result = await lifecycle.get("input")(
       { type: "input", text: "@explore find the flaky test", source: "interactive" },
       ctx({ mode: "print" }),
     );
-    await flush();
 
-    expect(result).toEqual({ action: "handled" });
-    expect(runMentionClone).toHaveBeenCalled();
+    expect(result).toEqual({ action: "continue" });
+    expect(runAgent).not.toHaveBeenCalled();
   });
 
   it("leaves a running agent alone headlessly rather than starting a rival", async () => {
@@ -799,23 +567,6 @@ describe("letting a clone of the conversation start the agent", () => {
 
     expect(result).toEqual({ action: "continue" });
     expect(session.steer).not.toHaveBeenCalled();
-    expect(runMentionClone).not.toHaveBeenCalled();
-  });
-
-  it("clones nothing when mentions are off", async () => {
-    const { lifecycle } = boot({ agentMentions: "off" });
-
-    expect(await send(lifecycle, "@explore find the flaky test")).toEqual({ action: "continue" });
-    expect(runMentionClone).not.toHaveBeenCalled();
-  });
-
-  it("starts the agent here instead when the mode is direct", async () => {
-    const { lifecycle } = bootDirect();
-    heldRun(fakeSession());
-
-    expect(await send(lifecycle, "@explore find the flaky test")).toEqual({ action: "handled" });
-    expect(runAgent).toHaveBeenCalled();
-    expect(runMentionClone).not.toHaveBeenCalled();
   });
 });
 
@@ -871,7 +622,7 @@ describe("input that is not a mention", () => {
     // the agent detaches, notify is a no-op outside the TUI, and print mode
     // exits having printed nothing. Only `direct` has that problem — the model
     // mode's headless behaviour is pinned separately below.
-    const { lifecycle } = bootDirect();
+    const { lifecycle } = boot();
     heldRun(fakeSession());
 
     const result = await lifecycle.get("input")(
@@ -1007,7 +758,7 @@ describe("@main — the escape hatch", () => {
 
 describe("@agent-<type> — Claude Code's manual spelling", () => {
   it("starts the agent the unprefixed handle would have", async () => {
-    const { lifecycle } = bootDirect();
+    const { lifecycle } = boot();
     finishedRun(fakeSession());
 
     const result = await send(lifecycle, "@agent-explore find the flaky test");
@@ -1370,7 +1121,7 @@ describe("resuming an evicted agent by name", () => {
   it("forgets an unopenable session so the next mention starts fresh", async () => {
     // A row that can only ever fail is worse than no row: it holds the handle
     // and refuses every message sent to it.
-    const { lifecycle, tools } = bootDirect();
+    const { lifecycle, tools } = boot();
     finishedRun(fakeSession());
     await evict(await spawnBackground(tools));
     await flush();

@@ -69,9 +69,6 @@ export interface AgentConfig {
    */
   allowedSubagents?: "all" | string[];
   systemPrompt: string;
-  promptMode: "replace" | "append";
-  /** Default for spawn: fork parent conversation. undefined = caller decides. */
-  inheritContext?: boolean;
   /** Default for spawn: run in background. undefined = caller decides. */
   runInBackground?: boolean;
   /** Default for spawn: no extension tools. undefined = caller decides. */
@@ -109,17 +106,13 @@ export type JoinMode = 'async' | 'group' | 'smart';
 export type WidgetMode = 'all' | 'background' | 'off';
 
 /**
- * How `@handle message` starts an agent that is not already running.
- * - `model`: inject Claude Code's `agent_mention` reminder and let the main
- *   model spawn it with the `Agent` tool, which is what Claude Code does.
+ * Whether `@handle message` is routed to a subagent.
  * - `direct`: spawn it here, immediately, with the typed message as its prompt
- *   and no main-model turn spent.
+ *   and no main-model turn spent. Messaging a running agent and resuming a
+ *   finished one are direct too.
  * - `off`: `@` means only "attach a file" again.
- *
- * Messaging a running agent and resuming a finished one are direct in every
- * mode — Claude Code only differs from us on the *new* invocation.
  */
-export type AgentMentionMode = 'model' | 'direct' | 'off';
+export type AgentMentionMode = 'direct' | 'off';
 
 /**
  * What survives a record's eviction so `@handle` keeps working. The live record
@@ -311,7 +304,6 @@ export interface AgentInvocation {
   requestedModel?: string;
   maxTurns?: number;
   isolated?: boolean;
-  inheritContext?: boolean;
   runInBackground?: boolean;
   isolation?: IsolationMode;
 }
@@ -339,12 +331,6 @@ export interface NotificationDetails {
   others?: NotificationDetails[];
 }
 
-export interface EnvInfo {
-  isGitRepo: boolean;
-  branch: string;
-  platform: string;
-}
-
 /**
  * A subagent spawn registered to fire on a schedule.
  *
@@ -362,7 +348,7 @@ export interface ScheduledSubagent {
   /** Computed at create time for interval/once. */
   intervalMs?: number;
 
-  // spawn params (subset of Agent tool params; no inherit_context, no resume)
+  // spawn params (subset of Agent tool params; no resume)
   subagent_type: SubagentType;
   prompt: string;
   model?: string;

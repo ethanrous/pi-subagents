@@ -41,3 +41,21 @@ export function abortable<T>(promise: Promise<T>, signal?: AbortSignal): Promise
     );
   });
 }
+
+/** How long `stop_subagent` waits for a stopped run to settle before returning anyway. */
+export const STOP_SETTLE_MS = 3000;
+
+/**
+ * Wait for a stopped run's promise to settle, at most `STOP_SETTLE_MS` and
+ * until the caller cancels. Never throws: the stop has already happened.
+ */
+export async function waitForSettle(promise: Promise<unknown>, signal?: AbortSignal): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<void>((resolve) => { timer = setTimeout(resolve, STOP_SETTLE_MS); });
+  const settled = promise.then(() => undefined, () => undefined);
+  try {
+    await abortable(Promise.race([settled, timeout]), signal);
+  } catch { /* wait cancelled */ } finally {
+    clearTimeout(timer);
+  }
+}
