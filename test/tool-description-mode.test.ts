@@ -99,8 +99,19 @@ describe("toolDescriptionMode", () => {
     const desc: string = tools.get("Agent").description;
     expect(desc).toContain("## Usage notes");
     expect(desc).toContain("## Writing the prompt");
-    // Full agent descriptions are embedded (a late Explore sentence survives).
-    expect(desc).toContain("very thorough");
+    // The built-in default is implicit, so with no agent files there is no type list.
+    expect(desc).not.toContain("general-purpose:");
+    expect(desc).not.toContain("Custom agent types");
+  });
+
+  it("lists custom agent types with their full descriptions, but not the default", () => {
+    const tools = setup(undefined, () => {
+      mkdirSync(join(tmpDir, ".pi", "agents"), { recursive: true });
+      writeFileSync(join(tmpDir, ".pi", "agents", "auditor.md"), "---\ndescription: Audits code. Very thorough.\n---\n\nBody.\n");
+    });
+    const desc: string = tools.get("Agent").description;
+    expect(desc).toContain("Custom agent types for subagent_type:\n- auditor: Audits code. Very thorough. (Tools:");
+    expect(desc).not.toContain("- general-purpose:");
   });
 
   it("compact mode swaps in the short description with one-line type list", () => {
@@ -109,10 +120,7 @@ describe("toolDescriptionMode", () => {
     expect(desc).toContain("Launch an autonomous agent");
     expect(desc).not.toContain("## Usage notes");
     expect(desc).not.toContain("## Writing the prompt");
-    // Type list keeps every agent but only the first sentence of each description.
-    expect(desc).toContain("- general-purpose:");
-    expect(desc).toContain("- Explore: Fast read-only search agent for locating code. (Tools:");
-    expect(desc).not.toContain("very thorough");
+    expect(desc).not.toContain("- general-purpose:");
     // The point of the feature: materially smaller than the full version.
     expect(desc.length).toBeLessThan(1600);
   });
@@ -196,7 +204,7 @@ describe("toolDescriptionMode", () => {
     });
     const desc: string = tools.get("Agent").description;
     expect(desc).toContain("GLOBAL CUSTOM");
-    expect(desc).toContain("- Explore: Fast read-only search agent for locating code. (Tools:");
+    expect(desc).toContain("- general-purpose: General-purpose agent for research, code search, and multi-step tasks. (Tools:");
   });
 
   it("{{scheduleGuideline}} expands to the schedule bullet when scheduling is on (default)", () => {
@@ -283,35 +291,6 @@ describe("toolDescriptionMode", () => {
   // TEXT expansion was tested — nothing asserted the schema itself, so the
   // parameter could keep costing tokens (and stay callable) while the prose
   // claimed otherwise.
-  // #330: the exploration guideline named Explore even when it could not be
-  // spawned. Claude Code adds its version of the line only when Explore is
-  // available (`suggestsExploreAgent`), so the example follows availability.
-  describe("the exploration guideline names Explore only when it can be spawned", () => {
-    const exploreLine = (tools: Map<string, any>) =>
-      (tools.get("Agent").promptGuidelines as string[]).find((g) => g.startsWith("For broad codebase exploration"));
-
-    it("suggests Explore by default", () => {
-      expect(exploreLine(setup())).toContain("Explore");
-    });
-
-    it("drops the example when the built-in agents are disabled", () => {
-      const line = exploreLine(setup({ disableDefaultAgents: true }));
-      expect(line).toBeDefined();
-      expect(line).not.toContain("Explore");
-    });
-
-    it("drops the example when an agent file disables Explore", () => {
-      const line = exploreLine(
-        setup(undefined, () => {
-          mkdirSync(join(tmpDir, ".pi", "agents"), { recursive: true });
-          writeFileSync(join(tmpDir, ".pi", "agents", "Explore.md"), "---\ndescription: off\nenabled: false\n---\nbody");
-        }),
-      );
-      expect(line).toBeDefined();
-      expect(line).not.toContain("Explore");
-    });
-  });
-
   describe("schedulingEnabled gates the schedule parameter", () => {
     const props = (tools: Map<string, any>) =>
       Object.keys(tools.get("Agent").parameters?.properties ?? {});

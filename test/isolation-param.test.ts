@@ -35,7 +35,7 @@ describe("isolationParam", () => {
     // The specific trap in #231: the subagent reviewed an empty `git diff
     // --cached` in a fresh copy and returned nothing, three times.
     const described = JSON.stringify(schema(true));
-    expect(described).toMatch(/uncommitted or staged/);
+    expect(described).toMatch(/cannot see uncommitted or staged changes/);
   });
 
   it("omits the parameter entirely when the project disabled worktrees", () => {

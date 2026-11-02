@@ -497,7 +497,7 @@ function extractText(content: unknown[]): string {
 export interface RunOptions {
   /** ExtensionAPI instance — used for pi.exec() instead of execSync. */
   pi: ExtensionAPI;
-  /** Manager-assigned id; suffixes session name to disambiguate parallel spawns (e.g. `Explore#a1b2c3d4`). */
+  /** Manager-assigned id; suffixes session name to disambiguate parallel spawns (e.g. `general-purpose#a1b2c3d4`). */
   agentId?: string;
   model?: Model<any>;
   maxTurns?: number;

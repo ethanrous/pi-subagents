@@ -292,36 +292,6 @@ describe("Agent tool result — effective model", () => {
   });
 });
 
-describe("Agent tool schema — available models", () => {
-  it("lists the available models in the model parameter once a session starts", async () => {
-    const tools = new Map<string, any>();
-    const handlers = new Map<string, (event: any, ctx: any) => Promise<void>>();
-    const pi = {
-      registerMessageRenderer: vi.fn(),
-      registerEntryRenderer: vi.fn(),
-      registerTool: vi.fn((tool: any) => tools.set(tool.name, tool)),
-      registerCommand: vi.fn(),
-      registerFlag: vi.fn(),
-      getFlag: vi.fn(),
-      getAllTools: vi.fn(() => [] as any[]),
-      setActiveTools: vi.fn(),
-      on: vi.fn((event: string, handler: any) => handlers.set(event, handler)),
-      events: { emit: vi.fn(), on: vi.fn(() => vi.fn()) },
-      appendEntry: vi.fn(),
-      sendMessage: vi.fn(),
-    } as any;
-    subagentsExtension(pi);
-
-    const before = tools.get("Agent").parameters.properties.model.description;
-    expect(before).not.toContain("Available models");
-
-    await handlers.get("session_start")!({ type: "session_start" }, ctx());
-
-    const after = tools.get("Agent").parameters.properties.model.description;
-    expect(after).toContain("Available models:\nanthropic: claude-haiku-4-5, claude-opus-4-6");
-  });
-});
-
 describe("Agent tool result — resume", () => {
   it("renders the reopened session's settings, not the resume call's", async () => {
     // resumeAgent only prompts the existing session: model and thinking on a

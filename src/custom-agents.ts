@@ -24,8 +24,7 @@ import type { AgentConfig, IsolationMode, MemoryScope, ThinkingLevel } from "./t
  * the colon, so `name: Code Reviewer` must work here too. (The stricter
  * letters/digits/underscore/hyphen regex in Claude Code applies to the Agent
  * tool's spawn-time `name` parameter, which is a different field.) Mixed case
- * has to be allowed regardless: the built-in types `Explore` and `Plan` use it,
- * and a file must be able to override one.
+ * is allowed so a file can override a built-in type by name.
  */
 const RESERVED_IN_TYPE = ":";
 
@@ -60,7 +59,7 @@ export interface LoadCustomAgentsOptions {
  * Project-level agents override global ones with the same name. On a name clash
  * between the two project locations, .pi/agents wins — .pi stays the project
  * authority; .agents/agents is an additional read location.
- * Any name is allowed — names matching defaults (e.g. "Explore") override them.
+ * Any name is allowed — names matching defaults (e.g. "general-purpose") override them.
  *
  * Package agents load *first*, so everything the user or project wrote outranks
  * them. That is what makes them safe to adopt: a package can offer a `reviewer`,

@@ -31,7 +31,7 @@ import { loadCustomAgents } from "./custom-agents.js";
 import { GroupJoinManager } from "./group-join.js";
 import { isolationParam, resolveAgentInvocationConfig, resolveJoinMode } from "./invocation-config.js";
 import { describeMention, handleBase, isReservedHandle, parseMention, resolveHandleToType, stripAgentPrefix } from "./mention.js";
-import { describeAvailableModels, describeModel, type ModelRegistry, resolveModel } from "./model-resolver.js";
+import { describeModel, type ModelRegistry, resolveModel } from "./model-resolver.js";
 import { checkModelScope, isScopeModelsEnabled, setScopeModelsEnabled } from "./model-scope.js";
 import { getMaxSubagentDepth, setMaxSubagentDepth } from "./nested-tools.js";
 import { createOutputFilePath, ensureOutputFile, getOutputTranscriptDefault, sessionTaskDir, setOutputTranscriptDefault, streamToOutputFile, writeInitialEntry } from "./output-file.js";
@@ -836,10 +836,6 @@ export default function (pi: ExtensionAPI) {
       fleet.setUICtx(ctx.ui as any);
       watchHandoffKey(ctx.ui);
     }
-    // Re-register with the available models in the `model` parameter
-    // description. Registering under the same name replaces the definition and
-    // keeps the tool active.
-    pi.registerTool({ ...registeredAgentTool, parameters: agentToolParameters(describeAvailableModels(ctx)) });
     manager.clearCompleted(true);
     // Guard mirrors the `!scheduler.isActive()` pattern below: session_start
     // fires once per activation, but a double-bind must not leak listeners.
@@ -980,7 +976,7 @@ export default function (pi: ExtensionAPI) {
     if (!isAgentMentionsEnabled()) return { action: "continue" };
     // Claiming the turn is TUI only, matching the `@` completion that teaches
     // the syntax. Pi defaults `session.prompt()` to source "interactive", so a
-    // headless `pi -p "@explore …"` reaches here too — and claiming it would
+    // headless `pi -p "@general-purpose …"` reaches here too — and claiming it would
     // answer with silence, which the background hold cannot fix: `handled`
     // returns from prompt() before any turn starts, so the loop that patch wraps
     // never runs (it holds subagents spawned by the Agent tool MID-turn, a
@@ -1309,8 +1305,8 @@ export default function (pi: ExtensionAPI) {
   }
 
   // ---- Disable default agents configuration ----
-  // When enabled, the three hardcoded default agents (general-purpose, Explore,
-  // Plan) are not registered. User-defined agents from project/global custom
+  // When enabled, the hardcoded default agent (general-purpose) is not registered.
+  // User-defined agents from project/global custom
   // agent dirs are completely unaffected — only DEFAULT_AGENTS are suppressed.
   // Defaults to false; opt-in via `/agents → Settings` or subagents.json.
   // State lives in agent-types.ts (isDefaultsDisabled) because registerAgents
@@ -1487,11 +1483,12 @@ export default function (pi: ExtensionAPI) {
   pi.on("agent_end", () => outbox.onAgentEnd());
   pi.on("agent_settled", () => outbox.onAgentEnd());
 
-  /** Build the full type list text dynamically from available agents only. */
-  const buildTypeListText = () => {
-    const available = getAvailableTypes();
+  /** Available types without the built-in defaults, which the description leaves implicit. */
+  const getCustomTypes = () => getAvailableTypes().filter((name) => !getAgentConfig(name)?.isDefault);
 
-    return available.map((name) => {
+  /** Build the full type list text dynamically from available agents only. */
+  const buildTypeListText = (names: string[] = getAvailableTypes()) => {
+    return names.map((name) => {
       const cfg = getAgentConfig(name);
       const modelSuffix = cfg?.model ? ` (${getModelLabelFromConfig(cfg.model)})` : "";
       const toolsSuffix = ` (Tools: ${formatToolsSuffix(cfg)})`;
@@ -1506,8 +1503,8 @@ export default function (pi: ExtensionAPI) {
   };
 
   /** Compact type list: one line per agent, first sentence only. */
-  const buildCompactTypeListText = () =>
-    getAvailableTypes().map((name) => {
+  const buildCompactTypeListText = (names: string[] = getAvailableTypes()) =>
+    names.map((name) => {
       const cfg = getAgentConfig(name);
       return `- ${name}: ${firstSentence(cfg?.description ?? name)} (Tools: ${formatToolsSuffix(cfg)})`;
     }).join("\n");
@@ -1565,9 +1562,8 @@ export default function (pi: ExtensionAPI) {
     schedule: Type.Optional(
       Type.String({
         description:
-          'Opt-in only — fire later instead of now. Omit to run immediately (the default, almost always correct). ' +
-          'Formats: 6-field cron ("0 0 9 * * 1" = 9am Mon), interval ("5m"/"1h"), one-shot ("+10m" or ISO). ' +
-          'Forces run_in_background; incompatible with resume. Returns job ID.',
+          'Run later instead of now; omit to run immediately. 6-field cron ("0 0 9 * * 1"), interval ("5m"), ' +
+          'or one-shot ("+10m" or ISO time). Runs in the background and cannot be combined with resume. Returns a job ID.',
       }),
     ),
   };
@@ -1575,7 +1571,7 @@ export default function (pi: ExtensionAPI) {
     isSchedulingEnabled() ? scheduleParamShape : {};
 
   const scheduleGuideline = isSchedulingEnabled()
-    ? `\n- Use \`schedule\` only when the user explicitly asked for scheduled / recurring / delayed execution (e.g. "every Monday", "in an hour"). Don't auto-schedule from vague intent like "monitor X" — run once now or ask.`
+    ? `\n- Use \`schedule\` only when the user explicitly asked for scheduled, recurring, or delayed execution. Do not schedule from vague intent like "monitor X".`
     : "";
 
   // Same trade as scheduleParam/scheduleGuideline above: `isolationParam` drops
@@ -1586,7 +1582,7 @@ export default function (pi: ExtensionAPI) {
   // With no per-result note by design, the model would have every reason to go
   // on reporting a `pi-agent-*` branch that was never created.
   const isolationGuideline = isWorktreeIsolationEnabled()
-    ? `\n- Use isolation: "worktree" to give the agent its own git worktree (safe parallel file modifications); leave it unset, or pass "off", for none. The worktree is removed when the agent finishes; if it made changes, they are committed to a branch and the branch is named in the result.`
+    ? `\n- Use isolation: "worktree" to give the agent its own git worktree. It is removed when the agent finishes, and any changes are committed to a branch named in the result.`
     : "";
 
   const isolationCompactGuideline = isWorktreeIsolationEnabled()
@@ -1596,8 +1592,10 @@ export default function (pi: ExtensionAPI) {
   // Compact Agent tool description (#91, `toolDescriptionMode: "compact"`) —
   // the same load-bearing facts as the full version at ~75% fewer tokens, for
   // small/local models. Per-option details live in the param descriptions.
-  const compactAgentToolDescription = `Launch an autonomous agent for complex, multi-step tasks. Agent types:
-${buildCompactTypeListText()}
+  /** The custom agent types block, with its leading blank line, or "" when only defaults exist. */
+  const customTypesSection = (list: string) => (list ? `\n\nCustom agent types for subagent_type:\n${list}` : "");
+
+  const compactAgentToolDescription = `Launch an autonomous agent for complex, multi-step tasks.${customTypesSection(buildCompactTypeListText(getCustomTypes()))}
 
 Custom agents: .pi/agents/<name>.md (project) or ${getAgentDir()}/agents/<name>.md (global).
 
@@ -1608,48 +1606,23 @@ Notes:
 - The result is not shown to the user — summarize it for them. Verify an agent's claimed code changes before reporting work done.
 - resume continues a previous agent by ID; steer_subagent messages a running one; stop_subagent stops one.${isolationCompactGuideline}`;
 
-  const fullAgentToolDescription = `Launch a new agent to handle complex, multi-step tasks autonomously. Each agent type has specific capabilities and tools available to it.
+  const fullAgentToolDescription = `Launch an agent to handle a complex, multi-step task autonomously.${customTypesSection(buildTypeListText(getCustomTypes()))}
 
-Available agent types and the tools they have access to:
-${buildTypeListText()}
-
-Custom agents can be defined in .pi/agents/<name>.md (project) or ${getAgentDir()}/agents/<name>.md (global) — they are picked up automatically. Project-level agents override global ones. Creating a .md file with the same name as a default agent overrides it.
-
-When using the Agent tool, specify a subagent_type parameter to select which agent type to use.
-
-## When not to use
-
-If the target is already known, use a direct tool — \`read\` for a known path, \`grep\`/\`find\` for a specific symbol or string. Reserve this tool for open-ended questions that span the codebase, or tasks that match an available agent type.
+Custom agents: .pi/agents/<name>.md (project) or ${getAgentDir()}/agents/<name>.md (global). A project agent overrides a global one, and a file named after a default agent overrides it.
 
 ## Usage notes
 
-- Always include a short (3-5 word) description summarizing what the agent will do (shown in UI).
-- When you launch multiple agents for independent work, send them in a single message with multiple tool uses so they run concurrently. If the user specifies that they want you to run agents "in parallel", you MUST send a single message with multiple Agent tool use content blocks.
-- When the agent is done, it returns a single message back to you. The result is not visible to the user — to show the user, send a text message with a concise summary.
-- Trust but verify: an agent's summary describes what it intended to do, not necessarily what it did. When an agent writes or edits code, check the actual changes before reporting the work as done.
-- Agents run in the background by default. When an agent runs in the background, you will be automatically notified when it completes — do NOT sleep, poll, or proactively check on its progress. Continue with other work or respond to the user instead.
-- **Foreground vs background**: Pass \`run_in_background: false\` only when your very next action depends on the agent's result and nothing else could usefully happen while it runs — e.g., a research agent whose finding gates the edit you're about to make. Otherwise let it run in the background (the default) — this includes fire-and-forget work, independent investigations, and anything where the user might hand you something else in the meantime. Wanting the result "next" is not enough on its own.
-- **Don't race**: after launching a background agent, you know nothing about its results. Never fabricate or predict them in any format — not as prose, summary, or structured output. The completion notification arrives in a later turn; it is never something you write yourself. If the user asks before it lands, say the agent is still running — give status, not a guess.
-- Use resume with an agent ID to continue a previous agent's work. A new (non-resume) Agent call starts a fresh agent with no memory of prior runs, so the prompt must be self-contained.
-- Use steer_subagent to send mid-run messages to a running background agent.
-- Use stop_subagent to stop a running or queued agent. Do not ask an agent to stop with steer_subagent.
-- Clearly tell the agent whether you expect it to write code or just to do research (search, file reads, etc.), since it is not aware of the user's intent.
-- If an agent's description says it should be used proactively, try to use it without the user having to ask for it first.
-- Use model to specify a different model (as "provider/modelId", or fuzzy e.g. "haiku", "sonnet").
-- Use thinking to control extended thinking level.${isolationGuideline}${scheduleGuideline}
+- Use a direct tool when the target is known (\`read\` for a path, \`grep\`/\`find\` for a symbol). Reserve agents for open-ended work or tasks that match an agent type.
+- Launch independent agents in one message with several Agent calls so they run concurrently.
+- Agents run in the background by default and you are notified on completion. Do not sleep, poll, or check on them. Pass \`run_in_background: false\` only when your very next action depends on the result and nothing else can usefully happen meanwhile.
+- Until the notification arrives you know nothing about the result. Never predict or fabricate it. If asked, say the agent is still running.
+- The result is not shown to the user, so summarize it for them. An agent's summary describes intent, not outcome: check its code changes before reporting work done.
+- \`resume\` continues a finished agent by ID. A new Agent call starts with no memory, so its prompt must be self-contained. \`steer_subagent\` messages a running agent and \`stop_subagent\` stops one.
+- Say whether you expect the agent to write code or only research.${isolationGuideline}${scheduleGuideline}
 
 ## Writing the prompt
 
-Brief the agent like a smart colleague who just walked into the room — it hasn't seen this conversation, doesn't know what you've tried, doesn't understand why this task matters.
-- Explain what you're trying to accomplish and why.
-- Describe what you've already learned or ruled out.
-- Give enough context about the surrounding problem that the agent can make judgment calls rather than just following a narrow instruction.
-- If you need a short response, say so ("report in under 200 words").
-- Lookups: hand over the exact command. Investigations: hand over the question — prescribed steps become dead weight when the premise is wrong.
-
-Terse command-style prompts produce shallow, generic work.
-
-**Never delegate understanding.** Don't write "based on your findings, fix the bug" or "based on the research, implement it." Those phrases push synthesis onto the agent instead of doing it yourself. Write prompts that prove you understood: include file paths, line numbers, what specifically to change.`;
+Brief the agent like a capable colleague who has not seen this conversation: what you want and why, what you have learned or ruled out, and enough context to make judgment calls. Say so if you want a short answer. For a lookup, give the exact command. For an investigation, give the question, not steps. Do not delegate understanding: never write "based on your findings, fix it". Include file paths, line numbers, and what to change.`;
 
   // `toolDescriptionMode: "custom"` — user-authored description with live
   // dynamic parts. Project file wins over global; missing/empty falls back to
@@ -1657,8 +1630,9 @@ Terse command-style prompts produce shallow, generic work.
   // is customizable — the parameter schema stays code-owned.
   const renderToolDescriptionTemplate = (template: string): string => {
     const vars: Record<string, () => string> = {
-      typeList: buildTypeListText,
-      compactTypeList: buildCompactTypeListText,
+      typeList: () => buildTypeListText(),
+      compactTypeList: () => buildCompactTypeListText(),
+      customTypes: () => customTypesSection(buildTypeListText(getCustomTypes())),
       agentDir: getAgentDir,
       isolationGuideline: () => isolationGuideline,
       scheduleGuideline: () => scheduleGuideline,
@@ -1699,10 +1673,7 @@ Terse command-style prompts produce shallow, generic work.
     return fullAgentToolDescription;
   })();
 
-  // The model registry is only reachable from a session context, so the
-  // parameter schema is built once without the list and rebuilt with it on
-  // session_start, when the tool is re-registered.
-  const agentToolParameters = (availableModels?: string) => Type.Object({
+  const agentToolParameters = () => Type.Object({
       prompt: Type.String({
         description: "The task for the agent to perform.",
       }),
@@ -1712,37 +1683,36 @@ Terse command-style prompts produce shallow, generic work.
       name: Type.Optional(
         Type.String({
           description:
-            'Optional memorable name for this agent, e.g. "auth-audit", so it can be addressed as `@name` at the prompt and by steer_subagent / get_subagent_result. Letters, digits, `_` and `-`. Worth setting when several agents of the same type run at once; omit for one-off work. The agent stays reachable by its type either way.',
+            'Optional name, e.g. "auth-audit", to address the agent as `@name` and in steer_subagent / get_subagent_result. Letters, digits, `_` and `-`.',
         }),
       ),
       subagent_type: Type.String({
-        description: `The type of specialized agent to use. Available types: ${getAvailableTypes().join(", ")}. Custom agents from .pi/agents/*.md (project) or ${getAgentDir()}/agents/*.md (global) are also available.`,
+        description: `Agent type: ${getAvailableTypes().join(", ")}.`,
       }),
       model: Type.Optional(
         Type.String({
           description:
-            'Optional model override; takes precedence over the agent type\'s default. Accepts "provider/modelId" or a fuzzy name (e.g. "haiku", "sonnet"). A name that matches none of the available models is rejected. Omit to use the agent type\'s default.'
-            + (availableModels ? `\n\nAvailable models:\n${availableModels}` : ""),
+            'Model override, as "provider/modelId" or a fuzzy name like "sonnet". An unknown name fails with the list of available models. Defaults to the agent type\'s model.',
         }),
       ),
       thinking: Type.Optional(
         Type.String({
-          description: `Thinking level: ${THINKING_LEVELS.join(", ")}. Overrides agent default.`,
+          description: `Thinking level: ${THINKING_LEVELS.join(", ")}.`,
         }),
       ),
       run_in_background: Type.Optional(
         Type.Boolean({
-          description: "Defaults to true — the agent runs detached, returning its ID immediately, and you are notified on completion. Set false only when your very next action depends on the result; the call then blocks and returns the agent's full output inline.",
+          description: "Default true: returns the agent ID at once and notifies you on completion. false blocks and returns the output inline.",
         }),
       ),
       resume: Type.Optional(
         Type.String({
-          description: "Optional agent ID to resume from. Continues from previous context. Resumes detached like any other spawn; pass run_in_background: false to block and get the result inline. The resumed run gets a fresh max_turns budget. An agent can only be resumed once its current run has finished — use steer_subagent to reach one mid-run.",
+          description: "ID of a finished agent to continue with its previous context.",
         }),
       ),
       isolated: Type.Optional(
         Type.Boolean({
-          description: "If true, agent gets no extension/MCP tools — only built-in tools.",
+          description: "If true, the agent gets only built-in tools, no extension or MCP tools.",
         }),
       ),
       ...isolationParam(isWorktreeIsolationEnabled()),
@@ -1755,12 +1725,7 @@ Terse command-style prompts produce shallow, generic work.
     description: agentToolDescription,
     promptSnippet: "Launch autonomous sub-agents for complex multi-step tasks",
     promptGuidelines: [
-      "Use Agent with specialized agents when the task matches an agent type's description. Subagents are valuable for parallelizing independent queries or for protecting the main context window from excessive results, but should not be used excessively when not needed. Importantly, avoid duplicating work that subagents are already doing — if you delegate research to a subagent, do not also perform the same searches yourself.",
-      // Names Explore only when it can be spawned, as Claude Code does (#330).
-      // Read at registration, like the type list in the description.
-      `For broad codebase exploration or research, spawn Agent with an appropriate subagent_type${getAvailableTypes().includes("Explore") ? " (e.g. Explore)" : ""}. Otherwise use direct tools (read, grep, find) when the target is already known.`,
-      "When an agent runs in the background, you will be notified on completion — do not poll or sleep waiting for it. Continue with other work instead.",
-      "Trust but verify: an agent's summary describes intent, not outcome. When an agent writes or edits code, check the actual changes before reporting work as done.",
+      "Use Agent to parallelize independent work or keep large results out of your context, not for targets a direct tool can reach. Do not repeat work you delegated.",
     ],
     parameters: agentToolParameters(),
 
@@ -2952,11 +2917,11 @@ Terse command-style prompts produce shallow, generic work.
     name: SUBAGENT_TOOL_NAMES.GET_RESULT,
     label: "Get Agent Result",
     description:
-      "Check status and retrieve a background agent's full result — its completion notification carries only a preview. Use the agent ID returned by Agent.",
+      "Get a background agent's status and full result; its completion notification has only a preview.",
     promptSnippet: "Check status and retrieve results from a background agent",
     parameters: Type.Object({
       agent_id: Type.String({
-        description: "The agent ID to check. The agent's handle also works — its `name` if you gave it one, otherwise its type (`explore`, `explore-2`).",
+        description: "Agent ID, or its handle: its `name`, or its type (`general-purpose`, `general-purpose-2`).",
       }),
       wait: Type.Optional(
         Type.Boolean({
@@ -3040,7 +3005,7 @@ Terse command-style prompts produce shallow, generic work.
     promptSnippet: "Send a steering message to redirect a running background agent",
     parameters: Type.Object({
       agent_id: Type.String({
-        description: "The agent ID to steer (must be currently running). The agent's handle also works — its `name` if you gave it one, otherwise its type (`explore`, `explore-2`).",
+        description: "ID or handle of a running agent: its `name`, or its type (`general-purpose`, `general-purpose-2`).",
       }),
       message: Type.String({
         description: "The steering message to send. This will appear as a user message in the agent's conversation.",
@@ -3097,7 +3062,7 @@ Terse command-style prompts produce shallow, generic work.
     promptSnippet: "Stop a running or queued agent and get its partial output",
     parameters: Type.Object({
       agent_id: Type.String({
-        description: "The agent ID to stop (must be running or queued). The agent's handle also works: its `name` if you gave it one, otherwise its type (`explore`, `explore-2`).",
+        description: "ID or handle of a running or queued agent: its `name`, or its type (`general-purpose`, `general-purpose-2`).",
       }),
     }),
     execute: async (_toolCallId, params, signal, _onUpdate, _ctx) => {
@@ -3892,7 +3857,7 @@ Write the file using the write tool. Only write the file, nothing else.`;
         {
           id: "disableDefaultAgents",
           label: "Disable defaults",
-          description: "Hide built-in agents (general-purpose, Explore, Plan) — custom agents are unaffected",
+          description: "Hide built-in agents (general-purpose) — custom agents are unaffected",
           currentValue: isDefaultsDisabled() ? "on" : "off",
           values: ["on", "off"],
         },

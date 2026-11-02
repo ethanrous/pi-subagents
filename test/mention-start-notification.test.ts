@@ -66,7 +66,7 @@ describe("an agent started by a mention", () => {
       failure: undefined,
     } as any);
 
-    await send(lifecycle, "@Explore find the planted bugs in src/");
+    await send(lifecycle, "@general-purpose find the planted bugs in src/");
     await new Promise(r => setTimeout(r, 500));
 
     expect(pi.sendMessage).toHaveBeenCalledWith(

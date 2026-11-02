@@ -57,7 +57,7 @@ const verdict = await agent(
     `Reconcile these reviews of ${target}. Where they disagree, say which is right and why.`,
     ...usable.map(r => `\n## ${r.lens}\n${r.text}`),
   ].join('\n'),
-  { label: 'synthesize', effort: 'high', agentType: 'Plan' },
+  { label: 'synthesize', effort: 'high', agentType: 'general-purpose' },
 )
 
 return { reviewed: usable.length, verdict }

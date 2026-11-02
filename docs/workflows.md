@@ -60,10 +60,10 @@ A **card in the transcript**, updating as the run goes:
 ▸ SubagentWorkflow  auth-audit                       3/7 agents · 1m12s
   Find routes missing auth checks, then verify each finding
   ╭─ Scan
-  │ └─ ✔ discover        · Explore · haiku 4.5 · 26.4k · 8 tool calls · 25s
+  │ └─ ✔ discover        · general-purpose · haiku 4.5 · 26.4k · 8 tool calls · 25s
   ╰─ Audit
-    ├─ ✔ audit:src/a.ts  · Explore · haiku 4.5 · 18.4k · 12 tool calls · 42s
-    ├─ ⟳ audit:src/b.ts  · Explore · haiku 4.5 · 8 tool calls · 21s
+    ├─ ✔ audit:src/a.ts  · general-purpose · haiku 4.5 · 18.4k · 12 tool calls · 42s
+    ├─ ⟳ audit:src/b.ts  · general-purpose · haiku 4.5 · 8 tool calls · 21s
     └─ ⟳ audit:src/c.ts
   ⎿  auditing 6 route files
 ```
@@ -238,7 +238,7 @@ Spawns one subagent and resolves to its final text — or, with `schema`, to a v
 |---|---|---|
 | `label` | string | Display name in the progress tree. Also the handle `resume` addresses |
 | `phase` | string | Put this agent in a named group, overriding the ambient `phase()`. **Use it inside `pipeline`/`parallel` stages**, where the ambient phase races |
-| `agentType` | string | Which agent definition to use. Defaults to `general-purpose`; built-ins are `general-purpose`, `Explore`, `Plan`, plus your custom agents |
+| `agentType` | string | Which agent definition to use. Defaults to `general-purpose`; the built-in is `general-purpose`, plus your custom agents |
 | `model` | string | `provider/modelId`, or fuzzy like `haiku` |
 | `effort` | string | `minimal`, `low`, `medium`, `high`, `xhigh`, `max`. Omitted, the agent definition's own `thinking` decides, then the parent's |
 | `isolation` | `"worktree"` | Run in a throwaway git worktree. Only when agents write files in parallel and would collide — it costs setup time and disk per agent. Only this option decides, as in Claude Code — an agent file's `isolation:` does not apply to workflow children |

@@ -33,30 +33,6 @@ export function describeModel(
 }
 
 /**
- * The models a spawn may name, one line per provider (`provider: id, id, ...`).
- * Follows `/model`: the session's scoped models when a scope is set, otherwise
- * every model with auth configured.
- */
-export function describeAvailableModels(ctx: {
-  modelRegistry: ModelRegistry;
-  scopedModels?: readonly { model: ModelEntry }[];
-}): string {
-  const models = ctx.scopedModels?.length
-    ? ctx.scopedModels.map(s => s.model)
-    : (ctx.modelRegistry.getAvailable?.() ?? ctx.modelRegistry.getAll()) as ModelEntry[];
-  const byProvider = new Map<string, string[]>();
-  for (const m of models) {
-    const ids = byProvider.get(m.provider) ?? [];
-    ids.push(m.id);
-    byProvider.set(m.provider, ids);
-  }
-  return [...byProvider.entries()]
-    .sort(([a], [b]) => a.localeCompare(b))
-    .map(([provider, ids]) => `${provider}: ${[...new Set(ids)].sort().join(", ")}`)
-    .join("\n");
-}
-
-/**
  * Resolve a model string to a Model instance.
  * Tries exact match first ("provider/modelId"), then fuzzy match against all available models.
  * Returns the Model on success, or an error message string on failure.

@@ -33,24 +33,8 @@ describe("buildAgentPrompt", () => {
     expect(prompt).not.toContain("<agent_instructions>");
   });
 
-  it("wraps Explore instructions in agent_instructions after the tag", () => {
-    const prompt = buildAgentPrompt(getDefaultConfig("Explore"));
-    expect(prompt).toContain("<agent_instructions>");
-    expect(prompt).toContain("READ-ONLY");
-    expect(prompt).toContain("file search specialist");
-    expect(prompt.indexOf("<agent_instructions>")).toBeGreaterThan(prompt.indexOf("<active_agent"));
-    expect(prompt).not.toContain("<sub_agent_context>");
-  });
-
-  it("wraps Plan instructions in agent_instructions", () => {
-    const prompt = buildAgentPrompt(getDefaultConfig("Plan"));
-    expect(prompt).toContain("<agent_instructions>");
-    expect(prompt).toContain("READ-ONLY");
-    expect(prompt).toContain("software architect");
-  });
-
   it("carries no environment header", () => {
-    const prompt = buildAgentPrompt(getDefaultConfig("Explore"));
+    const prompt = buildAgentPrompt(getDefaultConfig("general-purpose"));
     expect(prompt).not.toContain("# Environment");
     expect(prompt).not.toContain("You are a pi coding agent sub-agent");
   });

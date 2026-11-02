@@ -75,7 +75,7 @@ function boot(branch: any[]) {
   booted = lifecycle;
   const context = ctx({ sessionManager: { getSessionId: vi.fn(() => "s1"), getBranch: vi.fn(() => branch) } });
   const agent = (params: Record<string, unknown>) =>
-    tools.get("Agent").execute("tc", { description: "Review the change", subagent_type: "Explore", ...params }, undefined, undefined, context);
+    tools.get("Agent").execute("tc", { description: "Review the change", subagent_type: "general-purpose", ...params }, undefined, undefined, context);
   return { agent, lifecycle, manager: (globalThis as any)[MANAGER_KEY] };
 }
 
@@ -103,7 +103,7 @@ describe("Agent({ resume }) once the live record is gone", () => {
     const res = await agent({ prompt: "Now check the tests.", resume: id, run_in_background: false });
 
     const [, type, prompt, options] = vi.mocked(runAgent).mock.lastCall!;
-    expect(type).toBe("Explore");
+    expect(type).toBe("general-purpose");
     expect(prompt).toBe("Now check the tests.");
     expect(options.resumeSessionFile).toBe(sessionFile);
     expect(options.agentId).toBe(id);
@@ -166,12 +166,12 @@ describe("Agent({ resume }) once the live record is gone", () => {
     settleWith("OTHER", undefined);
     const { agent, manager } = boot(branch);
     const other = (await agent({ prompt: "Something else.", run_in_background: false }) as any).details.agentId;
-    expect(manager.getRecord(other).handle).toBe("explore");
+    expect(manager.getRecord(other).handle).toBe("general-purpose");
 
     settleWith("RESUMED-RUN", sessionFile);
     await agent({ prompt: "Continue.", resume: id, run_in_background: false });
 
-    expect(manager.getRecord(id).handle).not.toBe("explore");
+    expect(manager.getRecord(id).handle).not.toBe("general-purpose");
   });
 
   it("stays resumable after a reopen that failed before its session existed", async () => {
@@ -265,7 +265,7 @@ describe("worktreeLost", () => {
   });
 
   it("is saved in the record entry only when set", () => {
-    const base = { id: "a", type: "Explore", description: "d", status: "completed", startedAt: 0 } as AgentRecord;
+    const base = { id: "a", type: "general-purpose", description: "d", status: "completed", startedAt: 0 } as AgentRecord;
     expect(agentRecordEntryData(base)).not.toHaveProperty("worktreeLost", expect.anything());
     expect(agentRecordEntryData({ ...base, worktree: wt, worktreeResult: { hasChanges: true } }).worktreeLost).toBe(true);
   });
