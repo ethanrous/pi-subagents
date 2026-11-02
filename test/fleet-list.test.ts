@@ -12,6 +12,7 @@ import {
   type FleetWorkflow,
   formatFleetElapsed,
   formatFleetTokens,
+  withoutPromptCursor,
 } from "../src/ui/fleet-list.js";
 import { fakeAgentSession, fakeCapturedMode, fakeDocumentTree, toolsExpandedAccess } from "./helpers/fake-interactive-mode.js";
 
@@ -427,8 +428,23 @@ describe("FleetList vs other focused components (#123)", () => {
   });
 });
 
+describe("withoutPromptCursor", () => {
+  it("strips the fake-cursor form current pi-tui renders", () => {
+    expect(withoutPromptCursor(`> ${CURSOR_MARKER}\x1b_pi:fc\x07 \x1b_pi:/fc\x07│`)).toBe(">  │");
+  });
+
+  it("strips the inverse-video form older pi-tui renders", () => {
+    expect(withoutPromptCursor(`> ${CURSOR_MARKER}\x1b[7m \x1b[0m│`)).toBe(">  │");
+    expect(withoutPromptCursor("> \x1b[7m \x1b[0m│")).toBe(">  │");
+  });
+
+  it("leaves other inverse-video text alone", () => {
+    expect(withoutPromptCursor("\x1b[7mx\x1b[0m")).toBe("\x1b[7mx\x1b[0m");
+  });
+});
+
 describe("FleetList hides the prompt cursor while navigating", () => {
-  const CURSOR_BLOCK = "\x1b[7m \x1b[0m";
+  const CURSOR_BLOCK = "\x1b_pi:fc\x07 \x1b_pi:/fc\x07";
 
   /** A real, focused Editor with enough of a tui to render (pi's CustomEditor extends it). */
   function focusedEditor(): Editor {
@@ -455,7 +471,7 @@ describe("FleetList hides the prompt cursor while navigating", () => {
 
     h.press(DOWN);
     const during = editor.render(40);
-    expect(during.join("\n")).not.toContain("\x1b[7m");
+    expect(during.join("\n")).not.toContain("\x1b_pi:fc");
     expect(during.join("\n")).not.toContain(CURSOR_MARKER);
     // Same line count and visible width: only the cursor styling changed.
     expect(during.map(visibleWidth)).toEqual(before.map(visibleWidth));

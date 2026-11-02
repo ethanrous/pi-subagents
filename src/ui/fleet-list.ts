@@ -35,16 +35,23 @@ const TICK_MS = 200;
 const FINISHED_LINGER_MS = 4000;
 
 /**
- * The block pi-tui's `Editor` paints at the cursor of an empty prompt: an
- * inverse-video space, preceded by the zero-width hardware-cursor marker while
- * the editor is focused. The list only ever navigates at an empty prompt, so
- * this is the only form the cursor takes while it is hidden.
+ * The cell pi-tui's `Editor` paints at the cursor of an empty prompt, preceded by
+ * the zero-width hardware-cursor marker while the editor is focused. Current
+ * pi-tui wraps the space in fake-cursor markers that the TUI resolves to inverse
+ * video at paint time (they are not exported, so they are spelled out here);
+ * older pi-tui writes the inverse-video space directly. The list only ever
+ * navigates at an empty prompt, so these are the only forms the cursor takes
+ * while it is hidden.
  */
-const EMPTY_PROMPT_CURSOR = "\x1b[7m \x1b[0m";
+const EMPTY_PROMPT_CURSORS = ["\x1b_pi:fc\x07 \x1b_pi:/fc\x07", "\x1b[7m \x1b[0m"];
 
 /** A rendered editor line with its cursor block turned back into the space it covers. */
-function withoutPromptCursor(line: string): string {
-  return line.replaceAll(CURSOR_MARKER + EMPTY_PROMPT_CURSOR, " ").replaceAll(EMPTY_PROMPT_CURSOR, " ");
+export function withoutPromptCursor(line: string): string {
+  let out = line;
+  for (const cursor of EMPTY_PROMPT_CURSORS) {
+    out = out.replaceAll(CURSOR_MARKER + cursor, " ").replaceAll(cursor, " ");
+  }
+  return out;
 }
 
 /** Minimal UI surface the FleetView needs from `ctx.ui` (structural subset). */
